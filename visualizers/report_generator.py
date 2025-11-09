@@ -88,7 +88,8 @@ class ReportGenerator:
                             attention_exp: Dict[str, Any],
                             diffusion_exp: Dict[str, Any],
                             visualizations: Dict[str, np.ndarray],
-                            save_path: str) -> None:
+                            save_path: str,
+                            animation_paths: Optional[Dict[str, str]] = None) -> None:
         """
         Create HTML report for a single sample.
         
@@ -98,11 +99,20 @@ class ReportGenerator:
             diffusion_exp: Explanation from DiffusionExplainer
             visualizations: Dictionary of visualization arrays
             save_path: Path to save HTML file
+            animation_paths: Optional dictionary with animation GIF paths:
+                - 'denoising': Probability bars animation
+                - 'attention_evolution': Attention overlay animation
+                - 'synchronized': Combined multi-panel animation
+                - 'denoising_sequence': Image with attention evolution
         """
         html_content = self._generate_html_header()
         
         # Title and metadata
         html_content += self._generate_sample_header(sample_info, attention_exp, diffusion_exp)
+        
+        # Animations section (if available)
+        if animation_paths:
+            html_content += self._generate_animations_section(animation_paths, visualizations)
         
         # Attention section
         html_content += self._generate_attention_section(attention_exp, visualizations)
@@ -159,6 +169,119 @@ class ReportGenerator:
             f.write(html_content)
         
         print(f"[ReportGenerator] Saved summary report to {save_path}")
+    
+    def _create_animation_embed(self,
+                               static_image_path: Optional[str],
+                               animated_gif_path: str,
+                               caption: str,
+                               element_id: str) -> str:
+        """
+        Create HTML for animation with static/animated toggle.
+        
+        Args:
+            static_image_path: Path to static image (PNG), or None
+            animated_gif_path: Path to animated GIF
+            caption: Caption text for the animation
+            element_id: Unique ID for this animation element
+        
+        Returns:
+            HTML string with embedded animation and controls
+        
+        Features:
+            - Shows static image by default (if available)
+            - Toggle button to switch to animated GIF
+            - Play/pause functionality
+        """
+        # Encode paths for HTML
+        static_path = static_image_path if static_image_path else animated_gif_path
+        
+        html = f'''
+        <div class="animation-container" id="container_{element_id}">
+            <div class="animation-caption">{caption}</div>
+            <div class="animation-wrapper">
+                <img id="static_{element_id}" 
+                     src="../{static_path}" 
+                     style="display:block; max-width:100%; height:auto;"
+                     alt="{caption} (static)">
+                <img id="animated_{element_id}" 
+                     src="../{animated_gif_path}" 
+                     style="display:none; max-width:100%; height:auto;"
+                     alt="{caption} (animated)">
+            </div>
+            <div class="animation-controls">
+                <button onclick="toggleAnimation('{element_id}')" 
+                        id="btn_{element_id}"
+                        class="control-button">
+                    &#9654; Play Animation
+                </button>
+                <span class="control-info" id="info_{element_id}">
+                    (Showing static image)
+                </span>
+            </div>
+        </div>
+        '''
+        return html
+    
+    def _generate_animations_section(self, 
+                                    animation_paths: Dict[str, str],
+                                    visualizations: Dict[str, np.ndarray]) -> str:
+        """
+        Generate HTML section for animations.
+        
+        Args:
+            animation_paths: Dictionary of animation GIF paths
+            visualizations: Dictionary of static visualizations
+        
+        Returns:
+            HTML string with animations section
+        """
+        html = '''
+        <h2>Animations</h2>
+        <p>Interactive animations showing the evolution of predictions, attention, and model behavior through the denoising process.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        # Synchronized animation
+        if animation_paths.get('synchronized'):
+            html += self._create_animation_embed(
+                static_image_path=None,
+                animated_gif_path=animation_paths['synchronized'],
+                caption="Synchronized Multi-Panel View: Shows image with attention, probability bars, metadata, and model comparison evolving together.",
+                element_id="sync"
+            )
+        
+        # Image denoising sequence
+        if animation_paths.get('denoising_sequence'):
+            html += self._create_animation_embed(
+                static_image_path=None,
+                animated_gif_path=animation_paths['denoising_sequence'],
+                caption="Image Denoising Sequence: Original image with attention overlay evolving through timesteps.",
+                element_id="img_seq"
+            )
+        
+        # Probability bars animation
+        if animation_paths.get('denoising'):
+            html += self._create_animation_embed(
+                static_image_path=None,
+                animated_gif_path=animation_paths['denoising'],
+                caption="Probability Evolution: Bar chart showing how class probabilities change through denoising steps.",
+                element_id="probs"
+            )
+        
+        # Attention evolution animation
+        if animation_paths.get('attention_evolution'):
+            html += self._create_animation_embed(
+                static_image_path=None,
+                animated_gif_path=animation_paths['attention_evolution'],
+                caption="Attention Evolution: How attention regions change as the model refines its prediction.",
+                element_id="attn"
+            )
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
     
     def _generate_html_header(self) -> str:
         """Generate HTML header with CSS styling."""
@@ -357,6 +480,51 @@ class ReportGenerator:
             text-align: center;
             color: #7f8c8d;
             font-size: 0.9em;
+        }
+        
+        .animation-container {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        
+        .animation-caption {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #2c3e50;
+        }
+        
+        .animation-wrapper {
+            position: relative;
+            margin-bottom: 10px;
+        }
+        
+        .animation-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .control-button {
+            padding: 8px 16px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        .control-button:hover {
+            background: #2980b9;
+        }
+        
+        .control-info {
+            color: #666;
+            font-size: 13px;
         }
     </style>
     <script>
@@ -576,13 +744,36 @@ class ReportGenerator:
         return html
     
     def _generate_html_footer(self) -> str:
-        """Generate HTML footer."""
+        """Generate HTML footer with JavaScript for animation controls."""
         return """
     <div class="footer">
         <p>Generated by XAI Framework for Diffusion-Based Classification</p>
         <p>© 2025 | Research Tool</p>
     </div>
 </div>
+<script>
+    // Animation toggle functionality
+    function toggleAnimation(elementId) {
+        const staticImg = document.getElementById('static_' + elementId);
+        const animatedImg = document.getElementById('animated_' + elementId);
+        const btn = document.getElementById('btn_' + elementId);
+        const info = document.getElementById('info_' + elementId);
+        
+        if (staticImg.style.display === 'block') {
+            // Switch to animated
+            staticImg.style.display = 'none';
+            animatedImg.style.display = 'block';
+            btn.innerHTML = '&#9632; Stop Animation';
+            info.textContent = '(Playing animation)';
+        } else {
+            // Switch to static
+            staticImg.style.display = 'block';
+            animatedImg.style.display = 'none';
+            btn.innerHTML = '&#9654; Play Animation';
+            info.textContent = '(Showing static image)';
+        }
+    }
+</script>
 </body>
 </html>
 """

@@ -200,8 +200,9 @@ class AttentionVisualizer:
             fontsize=16, fontweight='bold', y=0.98
         )
         
-        # Convert to array
-        plt.tight_layout()
+        # Convert to array - use subplots_adjust for GridSpec layouts to avoid warnings
+        # GridSpec already handles spacing (wspace=0.3), just adjust margins for title
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
         fig.canvas.draw()
         
         # Get figure dimensions
@@ -279,7 +280,7 @@ class AttentionVisualizer:
             ax.axis('off')
         
         plt.suptitle('Class-Specific Saliency Maps', fontsize=16, fontweight='bold')
-        plt.tight_layout()
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
         
         # Convert to array
         fig.canvas.draw()
@@ -331,7 +332,7 @@ class AttentionVisualizer:
         for i, (idx, val) in enumerate(zip(x, patch_attention)):
             ax.text(idx, val + 0.01, f'{val:.3f}', ha='center', va='bottom', fontsize=10)
         
-        plt.tight_layout()
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
         
         # Convert to array
         fig.canvas.draw()
@@ -412,7 +413,7 @@ class AttentionVisualizer:
         axes[2].grid(axis='y', alpha=0.3)
         
         plt.suptitle('Global vs Local Pathway Predictions', fontsize=16, fontweight='bold')
-        plt.tight_layout()
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
         
         # Convert to array
         fig.canvas.draw()
@@ -612,18 +613,30 @@ class AttentionVisualizer:
             
             ax.imshow(overlay)
             
-            # Add title with timestep info
+            # Add title with timestep info and prediction change indicator
             timestep = attn_data.get('timestep', i)
             pred_class = attn_data.get('predicted_class', -1)
+            
+            # Check if prediction changed from previous frame
+            prediction_changed = False
+            if i > 0 and pred_class != -1:
+                prev_pred = attention_sequence[i-1].get('predicted_class', -1)
+                prediction_changed = (pred_class != prev_pred) and (prev_pred != -1)
+            
             if pred_class != -1:
                 class_name = self.class_names.get(str(pred_class), f"Class {pred_class}")
-                ax.set_title(f'Attention Evolution - Step {i+1}/{num_steps}\nTimestep: {timestep}, Predicted: {class_name}', 
-                           fontsize=12, fontweight='bold')
+                title = f'Attention Evolution - Step {i+1}/{num_steps}\n'
+                title += f'Timestep: {timestep} | Predicted: {class_name}'
+                if prediction_changed:
+                    title += ' [CHANGED]'
+                ax.set_title(title, fontsize=12, fontweight='bold',
+                           color='red' if prediction_changed else 'black')
             else:
                 ax.set_title(f'Attention Evolution - Step {i+1}/{num_steps}\nTimestep: {timestep}', 
                            fontsize=12, fontweight='bold')
             
-            plt.tight_layout()
+            # Adjust layout - no tight_layout needed for single subplot
+            fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.05)
             
             # Capture frame - ensure figure is fully rendered
             fig.canvas.draw()

@@ -137,8 +137,8 @@ class TrajectoryVisualizer:
                 f'stability: {stability:.3f})')
         fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
         
-        # Convert to array
-        plt.tight_layout()
+        # Convert to array - use tight_layout with rect parameter to avoid warnings
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
         fig.canvas.draw()
         width, height = fig.canvas.get_width_height()
         
@@ -346,7 +346,8 @@ class TrajectoryVisualizer:
         cbar = plt.colorbar(im, ax=ax)
         cbar.set_label('Probability', fontsize=11, fontweight='bold')
         
-        plt.tight_layout()
+        # Adjust layout
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
         
         # Convert to array
         fig.canvas.draw()
@@ -426,13 +427,22 @@ class TrajectoryVisualizer:
             ax.set_ylim(0, 1)
             ax.grid(axis='y', alpha=0.3)
             
-            # Add text annotations
+            # Add text annotations with prediction change indicator
+            prediction_changed = (frame_idx > 0 and 
+                                 pred_class != int(np.argmax(probs_over_time[frame_idx-1])))
+            
             info_text = f'Progress: {frame_idx+1}/{num_frames}\n'
             info_text += f'Predicted: {self.class_names.get(str(pred_class), f"Class {pred_class}")}\n'
-            info_text += f'Confidence: {pred_conf:.3f}'
+            info_text += f'Confidence: {pred_conf:.3f}\n'
+            if prediction_changed:
+                info_text += 'Status: CHANGED!'
+            
+            box_color = 'lightcoral' if prediction_changed else 'wheat'
             ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
                    fontsize=11, verticalalignment='top',
-                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
+                   bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.7,
+                            edgecolor='red' if prediction_changed else 'black',
+                            linewidth=2 if prediction_changed else 1))
             
             # Add value labels on top of bars
             for i, (bar, prob) in enumerate(zip(bars, probs)):
@@ -441,7 +451,8 @@ class TrajectoryVisualizer:
                     ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
                            f'{prob:.2f}', ha='center', va='bottom', fontsize=9)
             
-            plt.tight_layout()
+            # Adjust layout - use subplots_adjust to avoid tight_layout warnings
+            fig.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.1)
             
             # Capture frame - ensure figure is fully rendered
             fig.canvas.draw()
@@ -455,10 +466,6 @@ class TrajectoryVisualizer:
             frames.append(frame_rgb)
             
             plt.close(fig)  # Close immediately to free memory
-            
-            # Progress indicator
-            if (frame_idx + 1) % max(1, num_frames // 10) == 0:
-                print(f"  Frame {frame_idx + 1}/{num_frames} captured")
         
         if save_path is None:
             save_path = 'denoising_animation.gif'
