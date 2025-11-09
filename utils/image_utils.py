@@ -488,6 +488,40 @@ def create_multi_panel_figure(images: List[np.ndarray],
     return image_array
 
 
+def figure_to_array(fig) -> np.ndarray:
+    """
+    Convert matplotlib figure to numpy array (RGB).
+    
+    Args:
+        fig: Matplotlib figure to convert
+    
+    Returns:
+        RGB numpy array of shape (H, W, 3) with dtype uint8
+    
+    Note:
+        This function renders the figure and converts it to an RGB array.
+        Useful for saving visualizations or embedding in reports.
+    """
+    # Ensure figure is fully rendered
+    fig.canvas.draw()
+    
+    # Get RGBA buffer
+    buf = fig.canvas.buffer_rgba()
+    frame_rgba = np.asarray(buf)
+    
+    # Convert RGBA to RGB
+    frame_rgb = frame_rgba[:, :, :3].copy()
+    
+    # Convert to uint8 if needed
+    if frame_rgb.dtype != np.uint8:
+        if frame_rgb.max() <= 1.0:
+            frame_rgb = (np.clip(frame_rgb, 0, 1) * 255).astype(np.uint8)
+        else:
+            frame_rgb = np.clip(frame_rgb, 0, 255).astype(np.uint8)
+    
+    return frame_rgb
+
+
 def normalize_to_uint8(array: np.ndarray) -> np.ndarray:
     """
     Normalize array to uint8 [0, 255] range.

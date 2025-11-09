@@ -1,132 +1,99 @@
-# XAI Framework Configuration
-# This file controls all aspects of the XAI analysis pipeline
-
 # Model Configuration
 model:
-  # Path to the checkpoint file (relative to project root)
-  # Options: 'last' for last.ckpt, 'best' for best checkpoint, or specific path
   checkpoint_path: "logs/aptos/version_0/checkpoints/last.ckpt"
 
-  # Configuration file used during training (needed to reconstruct model architecture)
   config_path: "configs/aptos.yml"
 
-  # Diffusion configuration (needed for sampling)
   diffusion_config_path: "option/diff_DDIM.yaml"
 
-  # Device to run inference on ('cuda', 'cpu', or 'auto')
   device: "auto"
 
 # Sample Selection
 sampling:
-  # Path to CSV file with predictions (relative to xai/ directory)
   predictions_csv: "preds_epoch40.csv"
 
-  # Number of samples to select per class
   samples_per_class: 5
 
-  # Strategy for selecting samples within each class
   # Options: 'balanced' (mix correct/incorrect), 'correct_only', 'incorrect_only', 'random'
   selection_strategy: "balanced"
 
-  # If balanced, how many correct vs incorrect (will adjust based on availability)
-  # e.g., [3, 2] means prefer 3 correct, 2 incorrect per class
   balanced_ratio: [3, 2]
 
-  # Random seed for reproducibility
   random_seed: 42
 
 # Output Configuration
 output:
-  # Base output directory (relative to xai/)
   output_dir: "outputs"
 
-  # Subdirectories for different output types
   images_dir: "images"
   html_dir: "html"
   arrays_dir: "arrays"
 
-  # Whether to save each output type
   save_images: true
   save_html: true
   save_arrays: true
 
-  # Interactive and animated visualizations
-  create_interactive: true # Create interactive HTML visualizations with hover effects
-  create_animations: true # Create GIF animations (denoising process, attention evolution)
-  create_combined_animations: true # Create synchronized multi-panel animations
-  animation_fps: 2 # Frames per second for animations (3-5 recommended, 10+ for smooth)
-  animation_quality: "medium" # Quality: "low", "medium", "high" (affects DPI and file size)
-  show_animation_controls: true # Add play/pause/toggle controls in HTML reports
+  create_interactive: true
+  create_animations: true
+  create_combined_animations: true
+  animation_fps: 1
+  animation_quality: "medium"
+  show_animation_controls: true
 
-  # Image format for visualizations
   image_format: "png" # 'png' or 'jpg'
   image_dpi: 300
 
 # Visualization Settings
 visualization:
-  # Colormap for attention heatmaps
-  # Options: 'jet', 'viridis', 'plasma', 'inferno', 'hot', 'coolwarm'
   colormap: "jet"
-
-  # Opacity for attention overlay (0.0 to 1.0)
   overlay_alpha: 0.5
-
-  # Resolution to upsample attention maps to
   attention_resolution: [512, 512]
-
-  # Whether to normalize attention maps before visualization
   normalize_attention: true
-
-  # Figure size for matplotlib plots (width, height in inches)
   figure_size: [12, 8]
-
-  # Font sizes
   title_fontsize: 16
   label_fontsize: 12
   tick_fontsize: 10
-
-  # Bounding box settings for patches
   bbox_linewidth: 3
   bbox_colors: ["red", "blue", "green", "yellow", "cyan", "magenta"]
 
 # Explainer Settings
 explainers:
-  # Attention Explainer settings
   attention:
     enabled: true
-    # Whether to extract class-specific attention maps
     class_specific: true
-    # Whether to visualize individual patches
     show_patches: true
-    # Whether to show patch attention weights as text
     show_weights: true
 
   # Diffusion Explainer settings
   diffusion:
     enabled: true
-    # How many intermediate timesteps to visualize (too many makes it crowded)
     # Set to -1 to visualize all timesteps, or a positive integer to subsample
-    num_timesteps_to_visualize: 20
-    # Whether to create animation of diffusion process
-    create_animation: false # Set to true for GIF/MP4 (slower)
-    # Animation fps
-    animation_fps: 10
-    # Whether to show probability simplex plot
+    num_timesteps_to_visualize: -1
+    create_animation: true
+    animation_fps: 1
     show_simplex: false # 3D simplex only works well for 3-4 classes
+
+  guidance_map:
+    enabled: true
+    create_animation: true
+
+  feature_prior:
+    enabled: true
+    # Method for feature space visualization: 'pca' or 'tsne'
+    feature_space_method: "pca"
+
+  noise_analysis:
+    enabled: true
+    create_animation: true
 
 # Data Processing
 data:
-  # Image size expected by the model
   image_size: 512
-
-  # Normalization parameters (ImageNet defaults)
   normalize_mean: [0.485, 0.456, 0.406]
   normalize_std: [0.229, 0.224, 0.225]
 
-  # Number of classes
   num_classes: 5
 
-  # Class names for better visualization
   class_names:
     0: "No DR"
     1: "Mild"
@@ -139,20 +106,15 @@ logging:
   # Verbosity level (0: minimal, 1: normal, 2: detailed)
   verbosity: 1
 
-  # Whether to show progress bars
   show_progress: true
 
-  # Save processing log to file
   save_log: true
   log_file: "outputs/xai_processing.log"
 
 # Performance
 performance:
-  # Batch size for processing (usually 1 for XAI to save memory)
   batch_size: 1
 
-  # Number of workers for data loading
   num_workers: 0
 
-  # Whether to use mixed precision (faster but may affect explanations)
   use_amp: false

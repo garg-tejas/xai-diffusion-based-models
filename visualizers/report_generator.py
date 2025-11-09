@@ -89,7 +89,10 @@ class ReportGenerator:
                             diffusion_exp: Dict[str, Any],
                             visualizations: Dict[str, np.ndarray],
                             save_path: str,
-                            animation_paths: Optional[Dict[str, str]] = None) -> None:
+                            animation_paths: Optional[Dict[str, str]] = None,
+                            guidance_exp: Optional[Dict[str, Any]] = None,
+                            feature_exp: Optional[Dict[str, Any]] = None,
+                            noise_exp: Optional[Dict[str, Any]] = None) -> None:
         """
         Create HTML report for a single sample.
         
@@ -104,6 +107,9 @@ class ReportGenerator:
                 - 'attention_evolution': Attention overlay animation
                 - 'synchronized': Combined multi-panel animation
                 - 'denoising_sequence': Image with attention evolution
+            guidance_exp: Optional explanation from GuidanceMapExplainer
+            feature_exp: Optional explanation from FeaturePriorExplainer
+            noise_exp: Optional explanation from NoiseExplainer
         """
         html_content = self._generate_html_header()
         
@@ -119,6 +125,18 @@ class ReportGenerator:
         
         # Diffusion section
         html_content += self._generate_diffusion_section(diffusion_exp, visualizations)
+        
+        # Guidance map section
+        if guidance_exp:
+            html_content += self._generate_guidance_section(guidance_exp, visualizations)
+        
+        # Feature prior section
+        if feature_exp:
+            html_content += self._generate_feature_prior_section(feature_exp, visualizations)
+        
+        # Noise analysis section
+        if noise_exp:
+            html_content += self._generate_noise_section(noise_exp, visualizations)
         
         # Analysis section
         html_content += self._generate_analysis_section(attention_exp, diffusion_exp, sample_info)
@@ -741,6 +759,185 @@ class ReportGenerator:
             html += f"<tr><td>{sample_name}</td><td>{gt}</td><td>{att_pred}</td><td>{diff_pred}</td><td><a href='{report_link}'>View Report</a></td></tr>"
         
         html += "</table>"
+        return html
+    
+    def _generate_guidance_section(self, guidance_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """
+        Generate HTML section for guidance map explanations.
+        
+        Args:
+            guidance_exp: Explanation from GuidanceMapExplainer
+            visualizations: Dictionary of visualization paths
+            
+        Returns:
+            HTML string with guidance section
+        """
+        html = '''
+        <h2>Dense Guidance Map Analysis</h2>
+        <p>The dense guidance map shows how global and local priors are interpolated across spatial locations to create a 2D guidance signal for diffusion.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        # Guidance heatmap
+        if 'guidance_heatmap' in visualizations:
+            vis_path = visualizations['guidance_heatmap']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Guidance Map Heatmap</h3>
+                <p>Per-class guidance distribution showing interpolation between global (diagonal) and local (off-diagonal) priors.</p>
+                <img src="../{vis_path}" alt="Guidance Map Heatmap" class="visualization-image">
+            </div>
+            '''
+        
+        # Prior interpolation plot
+        if 'prior_interpolation' in visualizations:
+            vis_path = visualizations['prior_interpolation']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Prior Interpolation Curve</h3>
+                <p>Smooth transition from global to local priors based on distance from diagonal.</p>
+                <img src="../{vis_path}" alt="Prior Interpolation" class="visualization-image">
+            </div>
+            '''
+        
+        # Prior comparison
+        if 'prior_comparison' in visualizations:
+            vis_path = visualizations['prior_comparison']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Global vs Local Prior Comparison</h3>
+                <p>Bar chart comparing predictions from global (full-image) and local (patch-based) pathways.</p>
+                <img src="../{vis_path}" alt="Prior Comparison" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
+    
+    def _generate_feature_prior_section(self, feature_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """
+        Generate HTML section for feature prior explanations.
+        
+        Args:
+            feature_exp: Explanation from FeaturePriorExplainer
+            visualizations: Dictionary of visualization paths
+            
+        Returns:
+            HTML string with feature prior section
+        """
+        html = '''
+        <h2>Feature Prior Analysis</h2>
+        <p>Analysis of how Transformer (global) and CNN (local) features are fused to create the feature prior F that conditions diffusion.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        # Feature contributions
+        if 'feature_contributions' in visualizations:
+            vis_path = visualizations['feature_contributions']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Feature Contributions</h3>
+                <p>Contribution of raw (Transformer) vs ROI (CNN) features to the final fused feature prior.</p>
+                <img src="../{vis_path}" alt="Feature Contributions" class="visualization-image">
+            </div>
+            '''
+        
+        # Fusion weights
+        if 'fusion_weights' in visualizations:
+            vis_path = visualizations['fusion_weights']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Fusion Weight Matrix</h3>
+                <p>Learnable fusion weights Q showing how different feature sources are combined.</p>
+                <img src="../{vis_path}" alt="Fusion Weights" class="visualization-image">
+            </div>
+            '''
+        
+        # Feature space comparison
+        if 'feature_space' in visualizations:
+            vis_path = visualizations['feature_space']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Feature Space Comparison</h3>
+                <p>PCA visualization comparing Transformer and CNN feature representations.</p>
+                <img src="../{vis_path}" alt="Feature Space" class="visualization-image">
+            </div>
+            '''
+        
+        # ROI importance
+        if 'roi_importance' in visualizations:
+            vis_path = visualizations['roi_importance']
+            html += f'''
+            <div class="visualization-item">
+                <h3>ROI Contribution Ranking</h3>
+                <p>Which ROI patches contribute most to the final prediction based on feature magnitudes and attention weights.</p>
+                <img src="../{vis_path}" alt="ROI Importance" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
+    
+    def _generate_noise_section(self, noise_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """
+        Generate HTML section for noise analysis explanations.
+        
+        Args:
+            noise_exp: Explanation from NoiseExplainer
+            visualizations: Dictionary of visualization paths
+            
+        Returns:
+            HTML string with noise section
+        """
+        html = '''
+        <h2>Heterologous Noise Analysis</h2>
+        <p>Analysis of heterologous noise patterns and noise reduction during the diffusion denoising process.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        # Noise interaction map
+        if 'noise_interaction' in visualizations:
+            vis_path = visualizations['noise_interaction']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Noise Interaction Map</h3>
+                <p>Spatial correlation patterns showing how noise points interact via convolution.</p>
+                <img src="../{vis_path}" alt="Noise Interaction" class="visualization-image">
+            </div>
+            '''
+        
+        # Timestep distribution
+        if 'timestep_distribution' in visualizations:
+            vis_path = visualizations['timestep_distribution']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Timestep Distribution</h3>
+                <p>Random timestep sampling across spatial locations (heterologous noise).</p>
+                <img src="../{vis_path}" alt="Timestep Distribution" class="visualization-image">
+            </div>
+            '''
+        
+        # Noise magnitude plot
+        if 'noise_magnitude' in visualizations:
+            vis_path = visualizations['noise_magnitude']
+            html += f'''
+            <div class="visualization-item">
+                <h3>Noise Reduction Curve</h3>
+                <p>Noise magnitude evolution showing reduction through denoising steps.</p>
+                <img src="../{vis_path}" alt="Noise Magnitude" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
         return html
     
     def _generate_html_footer(self) -> str:

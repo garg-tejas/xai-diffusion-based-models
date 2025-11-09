@@ -40,8 +40,14 @@ from xai.core.model_loader import ModelLoader
 from xai.core.sample_selector import SampleSelector
 from xai.explainers.attention_explainer import AttentionExplainer
 from xai.explainers.diffusion_explainer import DiffusionExplainer
+from xai.explainers.guidance_explainer import GuidanceMapExplainer
+from xai.explainers.feature_prior_explainer import FeaturePriorExplainer
+from xai.explainers.noise_explainer import NoiseExplainer
 from xai.visualizers.attention_vis import AttentionVisualizer
 from xai.visualizers.trajectory_vis import TrajectoryVisualizer
+from xai.visualizers.guidance_vis import GuidanceMapVisualizer
+from xai.visualizers.feature_prior_vis import FeaturePriorVisualizer
+from xai.visualizers.noise_vis import NoiseVisualizer
 from xai.visualizers.report_generator import ReportGenerator
 from xai.utils.image_utils import load_image, preprocess_for_model
 
@@ -204,13 +210,14 @@ class XAIPipeline:
         self.logger.info("-"*80)
         
         device = self.model_loader.device
+        explainer_config = {'num_classes': self.config.data.num_classes}
         
         # Attention explainer
         if self.config.explainers.attention.enabled:
             self.explainers['attention'] = AttentionExplainer(
                 model=self.model,
                 device=device,
-                config={'num_classes': self.config.data.num_classes}
+                config=explainer_config
             )
             self.logger.info("[OK] Attention explainer initialized")
         
@@ -219,9 +226,36 @@ class XAIPipeline:
             self.explainers['diffusion'] = DiffusionExplainer(
                 model=self.model,
                 device=device,
-                config={'subsample_timesteps': self.config.explainers.diffusion.num_timesteps_to_visualize}
+                config={**explainer_config, 'subsample_timesteps': self.config.explainers.diffusion.num_timesteps_to_visualize}
             )
             self.logger.info("[OK] Diffusion explainer initialized")
+        
+        # Guidance map explainer
+        if self.config.explainers.get('guidance_map', {}).get('enabled', False):
+            self.explainers['guidance_map'] = GuidanceMapExplainer(
+                model=self.model,
+                device=device,
+                config=explainer_config
+            )
+            self.logger.info("[OK] Guidance map explainer initialized")
+        
+        # Feature prior explainer
+        if self.config.explainers.get('feature_prior', {}).get('enabled', False):
+            self.explainers['feature_prior'] = FeaturePriorExplainer(
+                model=self.model,
+                device=device,
+                config=explainer_config
+            )
+            self.logger.info("[OK] Feature prior explainer initialized")
+        
+        # Noise explainer
+        if self.config.explainers.get('noise_analysis', {}).get('enabled', False):
+            self.explainers['noise'] = NoiseExplainer(
+                model=self.model,
+                device=device,
+                config=explainer_config
+            )
+            self.logger.info("[OK] Noise explainer initialized")
     
     def initialize_visualizers(self):
         """Initialize visualization modules."""
@@ -239,6 +273,9 @@ class XAIPipeline:
         
         self.visualizers['attention'] = AttentionVisualizer(vis_config)
         self.visualizers['trajectory'] = TrajectoryVisualizer(vis_config)
+        self.visualizers['guidance_map'] = GuidanceMapVisualizer(vis_config)
+        self.visualizers['feature_prior'] = FeaturePriorVisualizer(vis_config)
+        self.visualizers['noise'] = NoiseVisualizer(vis_config)
         self.report_generator = ReportGenerator(vis_config)
         
         self.logger.info("[OK] All visualizers initialized")
@@ -364,6 +401,168 @@ class XAIPipeline:
                     results['attention_evolution_path'] = str(attn_evolution_path.relative_to(self.output_dir))
                 except Exception as e:
                     self.logger.warning(f"Failed to create attention evolution animation: {e}")
+            
+            # Create combined animations if enabled
+            if self.config.output.get('create_combined_animations', True):
+                try:
+                    from xai.visualizers.combined_visualizer import CombinedVisualizer
+                    import numpy as np
+                    image_array = np.array(image_pil)
+                    
+                    # Initialize combined visualizer
+                    combined_vis = CombinedVisualizer(self.config.visualization)
+                    
+                    # Synchronized multi-panel animation
+                    sync_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_synchronized.gif"
+                    combined_vis.create_synchronized_animation(
+                        image_array, diffusion_exp, attention_exp,
+                        save_path=sync_anim_path,
+                        fps=self.config.output.animation_fps
+                    )
+                    results['synchronized_animation_path'] = str(sync_anim_path.relative_to(self.output_dir))
+                    
+                    # Image denoising sequence
+                    denoising_seq_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising_sequence.gif"
+                    combined_vis.create_image_denoising_sequence(
+                        image_array, diffusion_exp,
+                        save_path=denoising_seq_path,
+                        fps=self.config.output.animation_fps
+                    )
+                    results['denoising_sequence_path'] = str(denoising_seq_path.relative_to(self.output_dir))
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to create combined animations: {e}")
+        
+        # Run guidance map explainer
+        if 'guidance_map' in self.explainers:
+            try:
+                self.logger.info("Running guidance map explainer...")
+                guidance_exp = self.explainers['guidance_map'].explain(image_tensor, label=ground_truth)
+                results['guidance_exp'] = guidance_exp
+                
+                # Generate visualizations
+                guidance_vis = self.visualizers['guidance_map']
+                
+                # Guidance heatmap (all classes)
+                guidance_heatmap_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_guidance_heatmap.png"
+                guidance_vis.create_guidance_heatmap(
+                    guidance_exp['guidance_map'],
+                    save_path=guidance_heatmap_path
+                )
+                visualizations['guidance_heatmap'] = guidance_heatmap_path.relative_to(self.output_dir)
+                
+                # Interpolation plot
+                interpolation_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_prior_interpolation.png"
+                guidance_vis.create_interpolation_plot(
+                    guidance_exp['global_prior'],
+                    guidance_exp['local_prior'],
+                    guidance_exp['distance_matrix'],
+                    save_path=interpolation_path
+                )
+                visualizations['prior_interpolation'] = interpolation_path.relative_to(self.output_dir)
+                
+                # Prior comparison
+                comparison_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_prior_comparison.png"
+                guidance_vis.create_prior_comparison(
+                    guidance_exp['global_prior'],
+                    guidance_exp['local_prior'],
+                    guidance_exp.get('fusion_prior'),
+                    save_path=comparison_path
+                )
+                visualizations['prior_comparison'] = comparison_path.relative_to(self.output_dir)
+                
+                # Create guidance evolution animation from diffusion trajectory if available
+                if self.config.output.create_animations and 'diffusion' in self.explainers:
+                    try:
+                        diffusion_exp = results.get('diffusion_exp', {})
+                        if 'trajectory' in diffusion_exp:
+                            guidance_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_guidance_evolution.gif"
+                            guidance_vis.create_guidance_evolution_animation_from_trajectory(
+                                diffusion_exp['trajectory'],
+                                save_path=guidance_anim_path,
+                                fps=1
+                            )
+                            results['guidance_evolution_path'] = str(guidance_anim_path.relative_to(self.output_dir))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create guidance evolution animation: {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to run guidance map explainer: {e}")
+        
+        # Run feature prior explainer
+        if 'feature_prior' in self.explainers:
+            try:
+                self.logger.info("Running feature prior explainer...")
+                feature_exp = self.explainers['feature_prior'].explain(image_tensor, label=ground_truth)
+                results['feature_exp'] = feature_exp
+                
+                # Generate visualizations
+                feature_vis = self.visualizers['feature_prior']
+                
+                # Feature contribution plot
+                contribution_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_contributions.png"
+                feature_vis.create_feature_contribution_plot(
+                    feature_exp['contribution_scores'],
+                    save_path=contribution_path
+                )
+                visualizations['feature_contributions'] = contribution_path.relative_to(self.output_dir)
+                
+                # Fusion weight heatmap
+                fusion_weight_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_fusion_weights.png"
+                feature_vis.create_fusion_weight_heatmap(
+                    feature_exp['fusion_weights'],
+                    save_path=fusion_weight_path
+                )
+                visualizations['fusion_weights'] = fusion_weight_path.relative_to(self.output_dir)
+                
+                # Feature space comparison (PCA)
+                feature_space_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_space.png"
+                feature_vis.create_feature_comparison(
+                    feature_exp['raw_features'],
+                    feature_exp['roi_features'],
+                    save_path=feature_space_path,
+                    method='pca'
+                )
+                visualizations['feature_space'] = feature_space_path.relative_to(self.output_dir)
+                
+                # ROI contribution bars
+                roi_contribution_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_roi_importance.png"
+                feature_vis.create_roi_contribution_bars(
+                    feature_exp['roi_features'],
+                    feature_exp.get('patch_attention'),
+                    save_path=roi_contribution_path
+                )
+                visualizations['roi_importance'] = roi_contribution_path.relative_to(self.output_dir)
+                
+                # Create feature evolution animation if enabled
+                if self.config.output.create_animations and 'diffusion' in self.explainers:
+                    try:
+                        # Create feature sequence from diffusion trajectory (simplified)
+                        # In practice, this would track features at each timestep
+                        diffusion_exp = results.get('diffusion_exp', {})
+                        if 'trajectory' in diffusion_exp:
+                            # Create simplified feature sequence from trajectory
+                            feature_sequence = []
+                            for step in diffusion_exp['trajectory']:
+                                feature_sequence.append({
+                                    'timestep': step.get('timestep', 0),
+                                    'contribution_scores': feature_exp.get('contribution_scores', {}),
+                                    'roi_features': feature_exp.get('roi_features'),
+                                    'fusion_weights': feature_exp.get('fusion_weights'),
+                                    'prediction': step.get('predicted_class', feature_exp.get('prediction', 0)),
+                                    'confidence': float(step.get('probs', [0.0] * 5)[step.get('predicted_class', 0)])
+                                })
+                            
+                            feature_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_evolution.gif"
+                            feature_vis.create_feature_evolution_animation(
+                                feature_sequence,
+                                save_path=feature_anim_path,
+                                fps=1
+                            )
+                            results['feature_evolution_path'] = str(feature_anim_path.relative_to(self.output_dir))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create feature evolution animation: {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to run feature prior explainer: {e}")
         
         # Generate HTML report
         if self.config.output.save_html:
@@ -375,11 +574,28 @@ class XAIPipeline:
                 'ground_truth': ground_truth
             }
             
+            # Collect animation paths
+            animation_paths = {
+                'denoising': results.get('denoising_animation_path'),
+                'attention_evolution': results.get('attention_evolution_path'),
+                'synchronized': results.get('synchronized_animation_path'),
+                'denoising_sequence': results.get('denoising_sequence_path'),
+                'guidance_evolution': results.get('guidance_evolution_path'),
+                'feature_evolution': results.get('feature_evolution_path'),
+                'noise_evolution': results.get('noise_evolution_path'),
+            }
+            # Remove None values
+            animation_paths = {k: v for k, v in animation_paths.items() if v is not None}
+            
             self.report_generator.create_sample_report(
                 sample_info=sample_info,
                 attention_exp=results.get('attention_exp', {}),
                 diffusion_exp=results.get('diffusion_exp', {}),
+                guidance_exp=results.get('guidance_exp', {}),
+                feature_exp=results.get('feature_exp', {}),
+                noise_exp=results.get('noise_exp', {}),
                 visualizations=visualizations,
+                animation_paths=animation_paths,
                 save_path=report_path
             )
             results['report_path'] = str(report_path.relative_to(self.output_dir))
