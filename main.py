@@ -43,11 +43,19 @@ from xai.explainers.diffusion_explainer import DiffusionExplainer
 from xai.explainers.guidance_explainer import GuidanceMapExplainer
 from xai.explainers.feature_prior_explainer import FeaturePriorExplainer
 from xai.explainers.noise_explainer import NoiseExplainer
+from xai.explainers.faithfulness_validator import FaithfulnessValidator
+from xai.explainers.conditional_attribution_explainer import ConditionalAttributionExplainer
+from xai.explainers.spatiotemporal_trajectory_explainer import SpatioTemporalTrajectoryExplainer
+from xai.explainers.counterfactual_explainer import GenerativeCounterfactualExplainer
 from xai.visualizers.attention_vis import AttentionVisualizer
 from xai.visualizers.trajectory_vis import TrajectoryVisualizer
 from xai.visualizers.guidance_vis import GuidanceMapVisualizer
 from xai.visualizers.feature_prior_vis import FeaturePriorVisualizer
 from xai.visualizers.noise_vis import NoiseVisualizer
+from xai.visualizers.faithfulness_vis import FaithfulnessVisualizer
+from xai.visualizers.attribution_vis import AttributionVisualizer
+from xai.visualizers.spatiotemporal_vis import SpatioTemporalVisualizer
+from xai.visualizers.counterfactual_vis import CounterfactualVisualizer
 from xai.visualizers.report_generator import ReportGenerator
 from xai.utils.image_utils import load_image, preprocess_for_model
 
@@ -256,6 +264,56 @@ class XAIPipeline:
                 config=explainer_config
             )
             self.logger.info("[OK] Noise explainer initialized")
+        
+        # Faithfulness validator
+        if self.config.explainers.get('faithfulness', {}).get('enabled', False):
+            faithfulness_config = {
+                **explainer_config,
+                'deletion_steps': self.config.explainers.faithfulness.get('deletion_steps', 20),
+                'occlusion_method': self.config.explainers.faithfulness.get('occlusion_method', 'blur'),
+                'augmentation_count': self.config.explainers.faithfulness.get('augmentation_count', 10),
+            }
+            self.explainers['faithfulness'] = FaithfulnessValidator(
+                model=self.model,
+                device=device,
+                config=faithfulness_config
+            )
+            self.logger.info("[OK] Faithfulness validator initialized")
+        
+        # Conditional attribution explainer
+        if self.config.explainers.get('conditional_attribution', {}).get('enabled', False):
+            self.explainers['conditional_attribution'] = ConditionalAttributionExplainer(
+                model=self.model,
+                device=device,
+                config=explainer_config
+            )
+            self.logger.info("[OK] Conditional attribution explainer initialized")
+        
+        # Spatio-temporal trajectory explainer
+        if self.config.explainers.get('spatiotemporal', {}).get('enabled', False):
+            spatiotemporal_config = {
+                **explainer_config,
+                'track_timesteps': self.config.explainers.spatiotemporal.get('track_timesteps', [900, 700, 500, 300, 100, 10]),
+            }
+            self.explainers['spatiotemporal'] = SpatioTemporalTrajectoryExplainer(
+                model=self.model,
+                device=device,
+                config=spatiotemporal_config
+            )
+            self.logger.info("[OK] Spatio-temporal trajectory explainer initialized")
+        
+        # Counterfactual explainer
+        if self.config.explainers.get('counterfactual', {}).get('enabled', False):
+            counterfactual_config = {
+                **explainer_config,
+                'guidance_scale': self.config.explainers.counterfactual.get('guidance_scale', 5.0),
+            }
+            self.explainers['counterfactual'] = GenerativeCounterfactualExplainer(
+                model=self.model,
+                device=device,
+                config=counterfactual_config
+            )
+            self.logger.info("[OK] Counterfactual explainer initialized")
     
     def initialize_visualizers(self):
         """Initialize visualization modules."""
@@ -269,6 +327,7 @@ class XAIPipeline:
             'figure_size': self.config.visualization.figure_size,
             'image_dpi': self.config.output.image_dpi,
             'class_names': self.config.data.class_names,
+            'save_pdf': self.config.output.get('save_pdf', True),
         }
         
         self.visualizers['attention'] = AttentionVisualizer(vis_config)
@@ -276,9 +335,33 @@ class XAIPipeline:
         self.visualizers['guidance_map'] = GuidanceMapVisualizer(vis_config)
         self.visualizers['feature_prior'] = FeaturePriorVisualizer(vis_config)
         self.visualizers['noise'] = NoiseVisualizer(vis_config)
-        self.report_generator = ReportGenerator(vis_config)
+        self.visualizers['faithfulness'] = FaithfulnessVisualizer(vis_config)
+        self.visualizers['attribution'] = AttributionVisualizer(vis_config)
+        self.visualizers['spatiotemporal'] = SpatioTemporalVisualizer(vis_config)
+        self.visualizers['counterfactual'] = CounterfactualVisualizer(vis_config)
+        if self.config.output.get('save_html', False):
+            self.report_generator = ReportGenerator(vis_config)
+        else:
+            self.report_generator = None
         
         self.logger.info("[OK] All visualizers initialized")
+
+    
+    def _reset_cuda_context(self):
+        """Reset CUDA context if it's corrupted."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                # Force synchronization and clear cache
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                # Reset the error state - get device index from device object
+                device = self.model_loader.device
+                if device.type == 'cuda':
+                    device_idx = device.index if device.index is not None else 0
+                    torch.cuda.set_device(device_idx)
+        except Exception as e:
+            self.logger.warning(f"CUDA reset warning: {e}")
     
     def process_sample(self, sample_row, sample_idx: int) -> Dict[str, Any]:
         """
@@ -292,9 +375,9 @@ class XAIPipeline:
             Dictionary with all results and paths
         """
         # Get sample info
-        img_path_rel = sample_row['img_path']
+        img_path_rel = sample_row['image_path']
         img_path = Path(__file__).parent.parent / img_path_rel
-        ground_truth = int(sample_row['label'])
+        ground_truth = int(sample_row['true_label'])
         
         self.logger.info(f"\n{'='*60}")
         self.logger.info(f"Processing sample {sample_idx + 1}/{len(self.selected_samples)}")
@@ -306,21 +389,43 @@ class XAIPipeline:
         self.logger.info(f"{'='*60}")
         
         # Load and preprocess image
-        image_pil = load_image(
-            img_path,
-            target_size=(self.config.data.image_size, self.config.data.image_size)
-        )
-        image_tensor = preprocess_for_model(
-            image_pil,
-            normalize_mean=self.config.data.normalize_mean,
-            normalize_std=self.config.data.normalize_std
-        )
-        
-        # Move to device
-        image_tensor = image_tensor.to(self.model_loader.device)
+        try:
+            image_pil = load_image(
+                img_path,
+                target_size=(self.config.data.image_size, self.config.data.image_size)
+            )
+            image_tensor = preprocess_for_model(
+                image_pil,
+                normalize_mean=self.config.data.normalize_mean,
+                normalize_std=self.config.data.normalize_std
+            )
+            
+            # Move to device with error handling
+            try:
+                image_tensor = image_tensor.to(self.model_loader.device)
+                # Synchronize to catch any async errors
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    self.logger.warning(f"CUDA error detected, attempting to reset context: {e}")
+                    self._reset_cuda_context()
+                    # Retry once after reset
+                    try:
+                        image_tensor = image_tensor.to(self.model_loader.device)
+                        torch.cuda.synchronize()
+                    except RuntimeError as e2:
+                        self.logger.error(f"CUDA error persists after reset: {e2}")
+                        raise
+                else:
+                    raise
+        except Exception as e:
+            self.logger.error(f"Failed to load/preprocess image: {e}")
+            raise
         
         results = {
-            'img_path': str(img_path_rel),
+            'image_path': str(img_path_rel),
             'ground_truth': ground_truth,
             'sample_idx': sample_idx
         }
@@ -329,12 +434,19 @@ class XAIPipeline:
         
         # Run attention explainer
         if 'attention' in self.explainers:
-            self.logger.info("Running attention explainer...")
-            attention_exp = self.explainers['attention'].explain(image_tensor, label=ground_truth)
-            results['attention_exp'] = attention_exp
-            results['attention_prediction'] = attention_exp['prediction']
-            results['attention_confidence'] = attention_exp['confidence']
-            results['attention_correct'] = (attention_exp['prediction'] == ground_truth)
+            try:
+                self.logger.info("Running attention explainer...")
+                attention_exp = self.explainers['attention'].explain(image_tensor, label=ground_truth)
+                results['attention_exp'] = attention_exp
+                results['attention_prediction'] = attention_exp['prediction']
+                results['attention_confidence'] = attention_exp['confidence']
+                results['attention_correct'] = (attention_exp['prediction'] == ground_truth)
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    self.logger.warning(f"CUDA error in attention explainer: {e}")
+                    self._reset_cuda_context()
+                    raise
+                raise
             
             # Generate visualizations
             import numpy as np
@@ -357,14 +469,63 @@ class XAIPipeline:
                 except Exception as e:
                     self.logger.warning(f"Failed to create interactive visualization: {e}")
         
+        # Run faithfulness validator (after attention explainer)
+        if 'faithfulness' in self.explainers and 'attention' in self.explainers:
+            try:
+                self.logger.info("Running faithfulness validator...")
+
+                # Extract saliency map from attention explainer
+                saliency_map = attention_exp.get('saliency_map')
+                if saliency_map is not None:
+                    faithfulness_exp = self.explainers['faithfulness'].explain(
+                        image_tensor, 
+                        label=ground_truth,
+                        saliency_map=saliency_map
+                    )
+    
+                    results['faithfulness_exp'] = faithfulness_exp
+                    
+                    # Generate visualizations
+                    faithfulness_vis = self.visualizers['faithfulness']
+                    
+                    # Insertion/deletion curves
+                    curves_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_faithfulness_curves.png"
+                    faithfulness_vis.plot_insertion_deletion_curves(
+                        faithfulness_exp['deletion_curve'],
+                        faithfulness_exp['insertion_curve'],
+                        faithfulness_exp['deletion_auc'],
+                        faithfulness_exp['insertion_auc'],
+                        save_path=curves_path
+                    )
+                    visualizations['faithfulness_curves'] = curves_path.relative_to(self.output_dir)
+                    
+                    # Summary plot
+                    summary_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_faithfulness_summary.png"
+                    faithfulness_vis.plot_faithfulness_summary(
+                        faithfulness_exp,
+                        save_path=summary_path
+                    )
+                    visualizations['faithfulness_summary'] = summary_path.relative_to(self.output_dir)
+            except Exception as e:
+                self.logger.exception("Failed to run faithfulness validator")
+        
         # Run diffusion explainer
         if 'diffusion' in self.explainers:
-            self.logger.info("Running diffusion explainer...")
-            diffusion_exp = self.explainers['diffusion'].explain(image_tensor, label=ground_truth)
-            results['diffusion_exp'] = diffusion_exp
-            results['diffusion_prediction'] = diffusion_exp['prediction']
-            results['diffusion_confidence'] = diffusion_exp['confidence']
-            results['diffusion_correct'] = (diffusion_exp['prediction'] == ground_truth)
+            try:
+                self.logger.info("Running diffusion explainer...")
+
+                diffusion_exp = self.explainers['diffusion'].explain(image_tensor, label=ground_truth)
+
+                results['diffusion_exp'] = diffusion_exp
+                results['diffusion_prediction'] = diffusion_exp['prediction']
+                results['diffusion_confidence'] = diffusion_exp['confidence']
+                results['diffusion_correct'] = (diffusion_exp['prediction'] == ground_truth)
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    self.logger.warning(f"CUDA error in diffusion explainer: {e}")
+                    self._reset_cuda_context()
+                    raise
+                raise
             
             # Generate visualizations
             vis = self.visualizers['trajectory'].visualize_trajectory(
@@ -376,7 +537,7 @@ class XAIPipeline:
             # Create denoising animation if enabled
             if self.config.output.create_animations:
                 try:
-                    animation_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising.gif"
+                    animation_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising_frames.png"
                     self.visualizers['trajectory'].create_denoising_animation(
                         diffusion_exp,
                         save_path=animation_path,
@@ -391,7 +552,7 @@ class XAIPipeline:
                 try:
                     import numpy as np
                     image_array = np.array(image_pil)
-                    attn_evolution_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attention_evolution.gif"
+                    attn_evolution_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attention_evolution_frames.png"
                     self.visualizers['attention'].create_attention_evolution_animation(
                         image_array,
                         diffusion_exp['attention_evolution'],
@@ -413,7 +574,7 @@ class XAIPipeline:
                     combined_vis = CombinedVisualizer(self.config.visualization)
                     
                     # Synchronized multi-panel animation
-                    sync_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_synchronized.gif"
+                    sync_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_synchronized_frames.png"
                     combined_vis.create_synchronized_animation(
                         image_array, diffusion_exp, attention_exp,
                         save_path=sync_anim_path,
@@ -422,7 +583,7 @@ class XAIPipeline:
                     results['synchronized_animation_path'] = str(sync_anim_path.relative_to(self.output_dir))
                     
                     # Image denoising sequence
-                    denoising_seq_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising_sequence.gif"
+                    denoising_seq_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising_sequence_frames.png"
                     combined_vis.create_image_denoising_sequence(
                         image_array, diffusion_exp,
                         save_path=denoising_seq_path,
@@ -433,11 +594,112 @@ class XAIPipeline:
                 except Exception as e:
                     self.logger.warning(f"Failed to create combined animations: {e}")
         
+        # Run conditional attribution explainer (after diffusion, requires trajectory)
+        if 'conditional_attribution' in self.explainers:
+            try:
+                self.logger.info("Running conditional attribution explainer...")
+
+                attribution_exp = self.explainers['conditional_attribution'].explain(
+                    image_tensor, 
+                    label=ground_truth
+                )
+
+                results['attribution_exp'] = attribution_exp
+                
+                # Generate visualizations
+                attribution_vis = self.visualizers['attribution']
+                
+                # Feature attribution bars
+                bars_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attribution_bars.png"
+                attribution_vis.plot_feature_attribution_bars(
+                    attribution_exp['global_contribution'],
+                    attribution_exp['roi_contribution_scores'],
+                    save_path=bars_path
+                )
+                visualizations['attribution_bars'] = bars_path.relative_to(self.output_dir)
+                
+                # Guidance map heatmap
+                heatmap_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_guidance_attribution.png"
+                attribution_vis.plot_guidance_attribution_heatmap(
+                    attribution_exp['guidance_map_attribution'],
+                    save_path=heatmap_path
+                )
+                visualizations['guidance_attribution'] = heatmap_path.relative_to(self.output_dir)
+                
+                # Comprehensive comparison
+                comparison_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attribution_comparison.png"
+                attribution_vis.create_attribution_comparison(
+                    ground_truth,
+                    attribution_exp['prediction'],
+                    attribution_exp,
+                    save_path=comparison_path
+                )
+                visualizations['attribution_comparison'] = comparison_path.relative_to(self.output_dir)
+            except Exception as e:
+                self.logger.exception("Failed to run conditional attribution explainer")
+        
+        # Run spatio-temporal trajectory explainer
+        if 'spatiotemporal' in self.explainers:
+            try:
+                self.logger.info("Running spatio-temporal trajectory explainer...")
+
+                spatiotemporal_exp = self.explainers['spatiotemporal'].explain(
+                    image_tensor,
+                    label=ground_truth
+                )
+
+                results['spatiotemporal_exp'] = spatiotemporal_exp
+                
+                # Generate visualizations
+                spatiotemporal_vis = self.visualizers['spatiotemporal']
+                
+                # Attention evolution plot
+                evolution_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attention_evolution.png"
+                spatiotemporal_vis.plot_attention_evolution(
+                    spatiotemporal_exp['attention_trajectory'],
+                    save_path=evolution_path
+                )
+                visualizations['attention_evolution'] = evolution_path.relative_to(self.output_dir)
+                
+                # Coarse-to-fine transition
+                transition_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_coarse_to_fine.png"
+                spatiotemporal_vis.plot_coarse_to_fine_transition(
+                    spatiotemporal_exp['attention_trajectory'],
+                    save_path=transition_path
+                )
+                visualizations['coarse_to_fine'] = transition_path.relative_to(self.output_dir)
+                
+                # Animated heatmap if enabled
+                if self.config.output.create_animations:
+                    try:
+                        heatmap_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attention_heatmap_sequence.png"
+                        spatiotemporal_vis.create_attention_heatmap_sequence(
+                            spatiotemporal_exp['attention_trajectory'],
+                            save_path=heatmap_anim_path,
+                            fps=self.config.output.animation_fps
+                        )
+                        results['attention_heatmap_animation_path'] = str(heatmap_anim_path.relative_to(self.output_dir))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create attention heatmap animation: {e}")
+            except Exception as e:
+                self.logger.exception("Failed to run spatio-temporal trajectory explainer")
+        
         # Run guidance map explainer
         if 'guidance_map' in self.explainers:
             try:
                 self.logger.info("Running guidance map explainer...")
-                guidance_exp = self.explainers['guidance_map'].explain(image_tensor, label=ground_truth)
+                # Cleanup before explainer call
+
+                try:
+                    guidance_exp = self.explainers['guidance_map'].explain(image_tensor, label=ground_truth)
+                    # Cleanup after explainer call
+    
+                except RuntimeError as e:
+                    if "CUDA" in str(e):
+                        self.logger.warning(f"CUDA error in guidance map explainer: {e}")
+                        self._reset_cuda_context()
+                        raise
+                    raise
                 results['guidance_exp'] = guidance_exp
                 
                 # Generate visualizations
@@ -476,7 +738,7 @@ class XAIPipeline:
                     try:
                         diffusion_exp = results.get('diffusion_exp', {})
                         if 'trajectory' in diffusion_exp:
-                            guidance_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_guidance_evolution.gif"
+                            guidance_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_guidance_evolution.png"
                             guidance_vis.create_guidance_evolution_animation_from_trajectory(
                                 diffusion_exp['trajectory'],
                                 save_path=guidance_anim_path,
@@ -486,13 +748,24 @@ class XAIPipeline:
                     except Exception as e:
                         self.logger.warning(f"Failed to create guidance evolution animation: {e}")
             except Exception as e:
-                self.logger.warning(f"Failed to run guidance map explainer: {e}")
+                self.logger.exception("Failed to run guidance map explainer")
         
         # Run feature prior explainer
         if 'feature_prior' in self.explainers:
             try:
                 self.logger.info("Running feature prior explainer...")
-                feature_exp = self.explainers['feature_prior'].explain(image_tensor, label=ground_truth)
+                # Cleanup before explainer call
+
+                try:
+                    feature_exp = self.explainers['feature_prior'].explain(image_tensor, label=ground_truth)
+                    # Cleanup after explainer call
+    
+                except RuntimeError as e:
+                    if "CUDA" in str(e):
+                        self.logger.warning(f"CUDA error in feature prior explainer: {e}")
+                        self._reset_cuda_context()
+                        raise
+                    raise
                 results['feature_exp'] = feature_exp
                 
                 # Generate visualizations
@@ -514,13 +787,15 @@ class XAIPipeline:
                 )
                 visualizations['fusion_weights'] = fusion_weight_path.relative_to(self.output_dir)
                 
-                # Feature space comparison (PCA)
+                # Feature space comparison (PCA or t-SNE)
                 feature_space_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_space.png"
+                # Get method from config, default to 'pca' if not specified
+                feature_method = self.config.explainers.get('feature_prior', {}).get('feature_space_method', 'pca')
                 feature_vis.create_feature_comparison(
                     feature_exp['raw_features'],
                     feature_exp['roi_features'],
                     save_path=feature_space_path,
-                    method='pca'
+                    method=feature_method
                 )
                 visualizations['feature_space'] = feature_space_path.relative_to(self.output_dir)
                 
@@ -548,11 +823,12 @@ class XAIPipeline:
                                     'contribution_scores': feature_exp.get('contribution_scores', {}),
                                     'roi_features': feature_exp.get('roi_features'),
                                     'fusion_weights': feature_exp.get('fusion_weights'),
+                                    'patch_attention': feature_exp.get('patch_attention'),  # Add patch attention for ROI visualization
                                     'prediction': step.get('predicted_class', feature_exp.get('prediction', 0)),
                                     'confidence': float(step.get('probs', [0.0] * 5)[step.get('predicted_class', 0)])
                                 })
                             
-                            feature_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_evolution.gif"
+                            feature_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_evolution.png"
                             feature_vis.create_feature_evolution_animation(
                                 feature_sequence,
                                 save_path=feature_anim_path,
@@ -562,15 +838,70 @@ class XAIPipeline:
                     except Exception as e:
                         self.logger.warning(f"Failed to create feature evolution animation: {e}")
             except Exception as e:
-                self.logger.warning(f"Failed to run feature prior explainer: {e}")
+                self.logger.exception("Failed to run feature prior explainer")
+        
+        # Run counterfactual explainer (for interesting cases)
+        if 'counterfactual' in self.explainers:
+            # Only generate counterfactuals for specific transitions if configured
+            target_transitions = self.config.explainers.counterfactual.get('target_transitions', [])
+            should_generate = False
+            
+            if target_transitions:
+                # Check if this sample matches any target transition
+                current_pred = results.get('diffusion_prediction') or results.get('attention_prediction')
+                if current_pred is not None:
+                    for orig, target in target_transitions:
+                        if current_pred == orig:
+                            should_generate = True
+                            target_class = target
+                            break
+            else:
+                # Generate for all samples
+                should_generate = True
+                current_pred = results.get('diffusion_prediction') or results.get('attention_prediction')
+                if current_pred is not None and current_pred < 4:
+                    target_class = current_pred + 1
+                else:
+                    should_generate = False
+            
+            if should_generate:
+                try:
+                    self.logger.info(f"Running counterfactual explainer (target: {target_class})...")
+    
+                    counterfactual_exp = self.explainers['counterfactual'].explain(
+                        image_tensor,
+                        label=ground_truth,
+                        target_class=target_class
+                    )
+    
+                    results['counterfactual_exp'] = counterfactual_exp
+                    
+                    # Generate visualizations
+                    counterfactual_vis = self.visualizers['counterfactual']
+                    
+                    # Counterfactual comparison
+                    import numpy as np
+                    image_array = np.array(image_pil)
+                    comparison_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_counterfactual.png"
+                    counterfactual_vis.visualize_counterfactual(
+                        image_array,
+                        counterfactual_exp['counterfactual_image'],
+                        counterfactual_exp['delta_map'],
+                        save_path=comparison_path,
+                        original_class=counterfactual_exp['original_prediction'],
+                        counterfactual_class=counterfactual_exp['counterfactual_prediction']
+                    )
+                    visualizations['counterfactual_comparison'] = comparison_path.relative_to(self.output_dir)
+                except Exception as e:
+                    self.logger.exception("Failed to run counterfactual explainer")
         
         # Generate HTML report
-        if self.config.output.save_html:
+        if self.config.output.save_html and self.report_generator:
             self.logger.info("Generating HTML report...")
             report_path = self.html_dir / f"class_{ground_truth}_sample_{sample_idx}_report.html"
             
             sample_info = {
-                'img_path': img_path_rel,
+                'image_path': img_path_rel,
                 'ground_truth': ground_truth
             }
             
@@ -594,6 +925,10 @@ class XAIPipeline:
                 guidance_exp=results.get('guidance_exp', {}),
                 feature_exp=results.get('feature_exp', {}),
                 noise_exp=results.get('noise_exp', {}),
+                faithfulness_exp=results.get('faithfulness_exp', {}),
+                attribution_exp=results.get('attribution_exp', {}),
+                spatiotemporal_exp=results.get('spatiotemporal_exp', {}),
+                counterfactual_exp=results.get('counterfactual_exp', {}),
                 visualizations=visualizations,
                 animation_paths=animation_paths,
                 save_path=report_path
@@ -604,18 +939,47 @@ class XAIPipeline:
         if self.config.output.save_arrays:
             import numpy as np
             array_path = self.arrays_dir / f"class_{ground_truth}_sample_{sample_idx}_data.npz"
+            
+            # Prepare spatiotemporal trajectory data
+            spatiotemporal_exp = results.get('spatiotemporal_exp', {})
+            spatiotemporal_trajectory = spatiotemporal_exp.get('attention_trajectory', [])
+            
+            # Extract trajectory arrays for saving
+            spatiotemporal_data = {}
+            if spatiotemporal_trajectory:
+                spatiotemporal_data['spatiotemporal_timesteps'] = np.array([step['timestep'] for step in spatiotemporal_trajectory])
+                spatiotemporal_data['spatiotemporal_global_attention'] = np.array([step['global_attention'] for step in spatiotemporal_trajectory])
+                spatiotemporal_data['spatiotemporal_local_attention'] = np.array([step['local_attention'] for step in spatiotemporal_trajectory])
+                spatiotemporal_data['spatiotemporal_roi_attention'] = np.array([step['roi_attention'] for step in spatiotemporal_trajectory])
+                spatiotemporal_data['spatiotemporal_predictions'] = np.array([step['prediction'] for step in spatiotemporal_trajectory])
+                spatiotemporal_data['spatiotemporal_confidence'] = np.array([step['confidence'] for step in spatiotemporal_trajectory])
+                spatiotemporal_data['spatiotemporal_probs'] = np.array([step['probs'] for step in spatiotemporal_trajectory])
+            
             np.savez(
                 array_path,
                 attention_saliency=results.get('attention_exp', {}).get('saliency_map'),
-                diffusion_trajectory=[step['probs'] for step in results.get('diffusion_exp', {}).get('trajectory', [])]
+                diffusion_trajectory=[step['probs'] for step in results.get('diffusion_exp', {}).get('trajectory', [])],
+                **spatiotemporal_data
             )
         
+        # Save results as JSON for summary report generation
+        if self.config.output.get('save_json', True):
+            import json
+            json_path = self.output_dir / f"class_{ground_truth}_sample_{sample_idx}_results.json"
+            # Convert numpy arrays to lists for JSON serialization
+            json_results = self._convert_results_to_json_serializable(results)
+            with open(json_path, 'w') as f:
+                json.dump(json_results, f, indent=2)
+                        
         self.logger.info(f"[OK] Sample {sample_idx + 1} complete")
         
         return results
     
     def generate_summary_report(self, all_results: List[Dict[str, Any]]):
         """Generate summary HTML report."""
+        if not (self.config.output.save_html and self.report_generator):
+            return
+        
         self.logger.info("\n" + "="*80)
         self.logger.info("GENERATING SUMMARY REPORT")
         self.logger.info("="*80)
@@ -654,6 +1018,29 @@ class XAIPipeline:
                        if r.get('attention_prediction') == r.get('diffusion_prediction'))
         self.logger.info(f"Model agreement: {agreement}/{total} ({agreement/total*100:.1f}%)")
     
+    def _convert_results_to_json_serializable(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert results dictionary to JSON-serializable format."""
+        import numpy as np
+        import torch
+        
+        def convert_value(v):
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            elif isinstance(v, np.integer):
+                return int(v)
+            elif isinstance(v, np.floating):
+                return float(v)
+            elif isinstance(v, torch.Tensor):
+                return v.detach().cpu().numpy().tolist()
+            elif isinstance(v, dict):
+                return {k: convert_value(val) for k, val in v.items()}
+            elif isinstance(v, list):
+                return [convert_value(item) for item in v]
+            else:
+                return v
+        
+        return convert_value(results)
+    
     def run(self):
         """Run the complete XAI pipeline."""
         start_time = datetime.now()
@@ -680,11 +1067,21 @@ class XAIPipeline:
                 iterator = self.selected_samples.iterrows()
             
             for idx, row in iterator:
-                results = self.process_sample(row, idx)
-                all_results.append(results)
+                try:
+                    results = self.process_sample(row, idx)
+                    all_results.append(results)
+                except RuntimeError as e:
+                    if "CUDA" in str(e):
+                        self.logger.error(f"CUDA error on sample {idx + 1}, attempting recovery...")
+                        self._reset_cuda_context()
+                        # Try to continue with next sample
+                        self.logger.warning(f"Skipping sample {idx + 1} due to CUDA error")
+                        continue
+                    else:
+                        raise
             
             # Generate summary report
-            if self.config.output.save_html:
+            if self.config.output.save_html and self.report_generator:
                 self.generate_summary_report(all_results)
             
             # Print statistics

@@ -1,99 +1,75 @@
 # XAI Framework for Diffusion-Based Classification
 
-Explainable AI framework for diffusion-based medical image classifiers.
+Explainable AI framework for diffusion-based medical image classifiers. This framework focuses on explaining the Denoising U-Net (the actual decision-maker) rather than just the auxiliary DCG model.
 
-## Usage
+## Quick Start
+
+Run the pipeline with default settings:
 
 ```bash
-# Run with default config
+cd xai
 python main.py
+```
 
-# Custom config
-python main.py --config config/xai_config.yaml
+Override specific settings via command line:
 
-# Specify checkpoint and sample count
-python main.py --checkpoint logs/aptos/version_0/checkpoints/last.ckpt --samples 5
+```bash
+python main.py --checkpoint checkpoints/model.ckpt --samples 5 --output-dir my_outputs
 ```
 
 ## Configuration
 
-Edit `config/xai_config.yaml` to configure:
+Edit `config/xai_config.yaml` to configure model paths, sample selection, and which explainers to run. The config file controls:
 
-- Model checkpoint path
-- Sample selection (count, strategy)
-- Enabled explainers
-- Visualization settings
-- Output formats
+- Model checkpoint and config paths
+- Number of samples per class and selection strategy
+- Which explainers are enabled (attention, diffusion, faithfulness, attribution, etc.)
+- Visualization settings and output formats
 
-## Files
+## XAI-v2 Modules
 
-### Core
+The framework includes four new explainability modules that focus on the Denoising U-Net:
 
-- `main.py` - Main pipeline entry point, coordinates all components
-- `core/base_explainer.py` - Abstract base class for all explainers
-- `core/model_loader.py` - Loads trained model from PyTorch Lightning checkpoint
-- `core/sample_selector.py` - Selects representative samples from CSV predictions
+**Faithfulness Validator**: Validates that saliency maps actually highlight important regions using insertion/deletion games and semantic robustness tests.
 
-### Explainers
+**Conditional Attribution Explainer**: Quantifies how much the U-Net relies on global context versus local lesions by computing gradients through the entire reverse diffusion process.
 
-- `explainers/attention_explainer.py` - Extracts attention from auxiliary DCG model (saliency maps, patch locations, attention weights)
-- `explainers/diffusion_explainer.py` - Tracks diffusion denoising trajectory (probability evolution, prediction changes)
-- `explainers/guidance_explainer.py` - Extracts dense guidance maps showing interpolation between global and local priors
-- `explainers/feature_prior_explainer.py` - Analyzes feature fusion from Transformer and CNN encoders
-- `explainers/noise_explainer.py` - Analyzes heterologous noise patterns during diffusion
+**Spatio-Temporal Trajectory Explainer**: Tracks how attention evolves from global to local features across timesteps, showing the coarse-to-fine reasoning process.
 
-### Visualizers
+**Generative Counterfactual Explainer**: Generates counterfactual examples showing what minimal changes would flip the prediction, using guided diffusion.
 
-- `visualizers/attention_vis.py` - Creates attention visualizations (heatmaps, patch highlighting, animations)
-- `visualizers/trajectory_vis.py` - Creates diffusion trajectory plots (probability evolution, confidence, entropy)
-- `visualizers/guidance_vis.py` - Creates guidance map visualizations (heatmaps, interpolation plots, animations)
-- `visualizers/feature_prior_vis.py` - Creates feature prior visualizations (contributions, fusion weights, feature space)
-- `visualizers/noise_vis.py` - Creates noise analysis visualizations (interaction maps, magnitude plots, animations)
-- `visualizers/combined_visualizer.py` - Creates synchronized multi-panel animations
-- `visualizers/report_generator.py` - Generates HTML reports with embedded visualizations
+Enable or disable these modules in the config file under the `explainers` section.
 
-### Utils
+## Output Structure
 
-- `utils/image_utils.py` - Image processing utilities (loading, preprocessing, heatmap overlays, bounding boxes)
-- `utils/animation_utils.py` - Animation helpers (frame capture, GIF creation)
+Results are saved to the output directory (default: `outputs/`):
 
-### Config
+- `html/index.html` - Summary report across all samples
+- `html/class_X_sample_Y_report.html` - Individual sample reports with interactive visualizations
+- `images/` - All visualization images and animations
+- `arrays/` - NumPy arrays with raw explanation data (if enabled)
 
-- `config/xai_config.yaml` - Configuration file (model, sampling, explainers, visualization, output settings)
+## Runtime Inference
 
-## Outputs
+If you need to run inference during analysis instead of using pre-computed predictions, use the inference utilities:
 
-Results are saved in `outputs/`:
+```python
+from xai.utils.inference import load_model_for_inference, predict_with_intermediates
 
-- `images/` - PNG visualizations and GIF animations
-- `html/` - HTML reports
-- `arrays/` - NumPy arrays (raw data)
-- `run_config.yaml` - Copy of configuration used
-- `xai_processing.log` - Processing log
+model = load_model_for_inference('checkpoints/model.ckpt', 'configs/aptos.yml')
+result = predict_with_intermediates(model, 'path/to/image.png')
+```
 
-## Output Files
+This returns patches, attention weights, guidance maps, and predictions needed by the explainers.
 
-### Images
+## Summary Reports
 
-- `class_X_sample_Y_attention.png` - Attention visualization (4-panel)
-- `class_X_sample_Y_trajectory.png` - Diffusion trajectory (4-panel)
-- `class_X_sample_Y_guidance_heatmap.png` - Guidance map heatmap
-- `class_X_sample_Y_prior_interpolation.png` - Prior interpolation plot
-- `class_X_sample_Y_feature_contributions.png` - Feature contribution plot
-- `class_X_sample_Y_noise_interaction.png` - Noise interaction map
-- `class_X_sample_Y_attention_evolution.gif` - Attention evolution animation
-- `class_X_sample_Y_denoising.gif` - Denoising process animation
-- `class_X_sample_Y_guidance_evolution.gif` - Guidance evolution animation
-- `class_X_sample_Y_feature_evolution.gif` - Feature evolution animation
-- `class_X_sample_Y_noise_evolution.gif` - Noise evolution animation
-- `class_X_sample_Y_synchronized.gif` - Synchronized multi-panel animation
-- `class_X_sample_Y_denoising_sequence.gif` - Image denoising sequence
+After running the main pipeline, generate aggregated reports:
 
-### HTML Reports
+```bash
+python generate_xai_v2_report.py --results-dir outputs --output-dir paper_figures
+```
 
-- `class_X_sample_Y_report.html` - Individual sample report
-- `index.html` - Summary report across all samples
+## Troubleshooting
 
-### Arrays
-
-- `class_X_sample_Y_data.npz` - Raw explanation data (NumPy archive)
+If you encounter checkpoint errors, verify the path in the config file or use the `--checkpoint` argument. For CUDA out of memory issues, reduce the number of samples per class or disable some explainers. The pipeline handles CUDA memory cleanup automatically and saves results incrementally.

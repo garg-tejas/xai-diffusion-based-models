@@ -39,7 +39,14 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from xai.utils.image_utils import figure_to_array
-from xai.utils.animation_utils import capture_frame, save_frames_as_gif
+from xai.utils.animation_utils import capture_frame
+from xai.utils.pdf_utils import (
+    save_figure_as_pdf,
+    save_animation_frames_as_pdf,
+    save_frame_grid_as_image,
+    select_key_frames,
+    apply_publication_style
+)
 
 
 class GuidanceMapVisualizer:
@@ -64,6 +71,11 @@ class GuidanceMapVisualizer:
         self.colormap = config.get('colormap', 'viridis')
         self.figsize = config.get('figure_size', [12, 8])
         self.class_names = config.get('class_names', {})
+        self.save_pdf = config.get('save_pdf', True)
+        self.dpi = config.get('image_dpi', 300)
+        
+        # Apply publication style
+        apply_publication_style()
         
         # Default class names if not provided
         if not self.class_names:
@@ -111,6 +123,12 @@ class GuidanceMapVisualizer:
             ax.legend()
             
             fig.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.1)
+            
+            # Save PDF if enabled
+            if self.save_pdf and save_path:
+                pdf_path = Path(save_path).with_suffix('.pdf')
+                save_figure_as_pdf(fig, pdf_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.1)
+            
             vis_array = figure_to_array(fig)
             plt.close(fig)
             
@@ -143,6 +161,12 @@ class GuidanceMapVisualizer:
             
             fig.suptitle('Guidance Maps by Class', fontsize=16, fontweight='bold', y=0.98)
             fig.subplots_adjust(left=0.05, right=0.95, top=0.94, bottom=0.05)
+            
+            # Save PDF if enabled
+            if self.save_pdf and save_path:
+                pdf_path = Path(save_path).with_suffix('.pdf')
+                save_figure_as_pdf(fig, pdf_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.1)
+            
             vis_array = figure_to_array(fig)
             plt.close(fig)
         
@@ -371,11 +395,54 @@ class GuidanceMapVisualizer:
             if (frame_idx + 1) % max(1, num_frames // 10) == 0:
                 print(f"  Frame {frame_idx + 1}/{num_frames} captured")
         
-        if save_path is None:
-            save_path = 'guidance_evolution.gif'
+        if len(frames) == 0:
+            raise ValueError("No frames generated for guidance evolution visualization")
         
-        print(f"[GuidanceMapVisualizer] Saving animation to {save_path}...")
-        save_frames_as_gif(frames, save_path, fps=fps)
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
+        
+        frame_titles = []
+        for idx in frame_indices:
+            step = diffusion_trajectory[idx]
+            timestep = step.get('timestep', idx)
+            pred_class = step.get('predicted_class', -1)
+            class_name = self.class_names.get(str(pred_class), f"Class {pred_class}") if pred_class != -1 else "Unknown"
+            frame_titles.append(f"t={timestep}, {class_name}")
+        
+        if save_path is None:
+            save_path = 'guidance_evolution.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
+            save_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Guidance Evolution Through Diffusion Timesteps',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[GuidanceMapVisualizer] Stacked guidance frames saved to {save_path}")
+        
+        if self.save_pdf:
+            pdf_path = save_path.with_suffix('.pdf')
+            save_animation_frames_as_pdf(
+                selected_frames,
+                pdf_path,
+                layout=layout,
+                titles=frame_titles,
+                suptitle='Guidance Evolution Through Diffusion Timesteps',
+                dpi=self.dpi,
+                frame_size=(3.5, 3.5),
+                spacing=0.4
+            )
+            print(f"[GuidanceMapVisualizer] PDF with frames saved to {pdf_path}")
         
         return save_path
     
@@ -443,11 +510,51 @@ class GuidanceMapVisualizer:
             if (i + 1) % max(1, len(guidance_sequence) // 10) == 0:
                 print(f"  Frame {i + 1}/{len(guidance_sequence)} captured")
         
-        if save_path is None:
-            save_path = 'guidance_evolution.gif'
+        if len(frames) == 0:
+            raise ValueError("No frames generated for guidance evolution visualization")
         
-        print(f"[GuidanceMapVisualizer] Saving animation to {save_path}...")
-        save_frames_as_gif(frames, save_path, fps=fps)
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
+        
+        frame_titles = []
+        for idx in frame_indices:
+            timestep = timesteps[idx] if idx < len(timesteps) else idx
+            frame_titles.append(f"t={timestep}")
+        
+        if save_path is None:
+            save_path = 'guidance_evolution.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
+            save_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Guidance Evolution Heatmaps',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[GuidanceMapVisualizer] Stacked guidance frames saved to {save_path}")
+        
+        if self.save_pdf:
+            pdf_path = save_path.with_suffix('.pdf')
+            save_animation_frames_as_pdf(
+                selected_frames,
+                pdf_path,
+                layout=layout,
+                titles=frame_titles,
+                suptitle='Guidance Evolution Heatmaps',
+                dpi=self.dpi,
+                frame_size=(3.5, 3.5),
+                spacing=0.4
+            )
+            print(f"[GuidanceMapVisualizer] PDF with frames saved to {pdf_path}")
         
         return save_path
 

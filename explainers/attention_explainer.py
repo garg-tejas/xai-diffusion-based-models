@@ -1,8 +1,19 @@
 """
-Attention Explainer Module
+Attention Explainer Module (AuxiliaryPriorValidator)
 
 This module extracts and processes built-in attention mechanisms from the
 auxiliary DCG (Deep Classification with Global-local features) model.
+
+**Role in XAI-v2 Framework:**
+This explainer serves as the "AuxiliaryPriorValidator" - it validates the DCG guidance
+(the "guidebook"), not the final decision made by the Denoising U-Net. The output from
+this module is the "Ground Truth Guidance Map" that we use to validate whether the U-Net's
+final decision corresponds to the regions the DCG's saliency map highlighted.
+
+**Important Note:**
+This explainer answers "WHERE does the guidebook (DCG) get its information?" but does NOT
+answer "Which parts of the guidebook did the driver (Denoising U-Net) actually read and
+listen to when making its final decision?" For that, see ConditionalAttributionExplainer.
 
 What We Extract:
 1. Saliency Map (16x16): Global attention highlighting important regions
@@ -15,6 +26,7 @@ Purpose:
 - Leverage model's built-in attention for explanations
 - No additional computation needed (attention is part of forward pass)
 - Provides multi-scale explanations (global + local)
+- Validates DCG guidance quality (used in faithfulness validation)
 
 Future Extensions:
 - Extract attention from diffusion model's conditional weights

@@ -72,6 +72,8 @@ class NoiseExplainer(BaseExplainer):
         self.num_classes = config.get('num_classes', 5)
         self.model_config = model.params
         
+        self.num_steps_faithfulness = config.get('num_steps_faithfulness', 100)
+        
         print(f"[NoiseExplainer] Initialized")
         print(f"  Number of classes: {self.num_classes}")
         print(f"  Device: {self.device}")
@@ -377,5 +379,248 @@ class NoiseExplainer(BaseExplainer):
             'correlations': correlations,
             'reduction_curve': reduction_curve,
             'spatial_pattern': spatial_pattern
+        }
+    
+    def inject_input_noise(self, image: torch.Tensor, sigma: float) -> torch.Tensor:
+        """
+        Inject input noise to image.
+        
+        Used for noise sensitivity analysis (Fig 5 & 6).
+        
+        Args:
+            image: Input image tensor (C, H, W) or (1, C, H, W)
+            sigma: Noise level (standard deviation)
+        
+        Returns:
+            Noisy image tensor with same shape as input
+        """
+        image = self._preprocess_image(image)
+        
+        # Generate noise
+        noise = torch.randn_like(image) * sigma
+        
+        # Add noise to image
+        noisy_image = image + noise
+        
+        # Clamp to valid range [0, 1] (assuming normalized image)
+        noisy_image = torch.clamp(noisy_image, 0.0, 1.0)
+        
+        return noisy_image
+    
+    def compute_noise_sensitivity(self,
+                                  image: torch.Tensor,
+                                  saliency_map: np.ndarray,
+                                  sigma: float,
+                                  n_runs: int = 20) -> Dict[str, Any]:
+        """
+        Compute noise sensitivity by running multiple times with input noise.
+        
+        Used for Fig 5: variance heatmap over N runs.
+        
+        Args:
+            image: Input image tensor
+            saliency_map: Baseline saliency map (H, W)
+            sigma: Noise level
+            n_runs: Number of runs for variance computation
+        
+        Returns:
+            Dictionary containing:
+            - 'clean_saliency': Baseline saliency map
+            - 'noisy_saliencies': List of saliency maps under noise [n_runs]
+            - 'mean_saliency': Mean saliency across runs
+            - 'variance_map': Variance heatmap (H, W)
+            - 'std_map': Standard deviation map (H, W)
+        """
+        image = self._preprocess_image(image)
+        
+        # Get baseline saliency (clean image)
+        with torch.no_grad():
+            y_fusion, _, _, _, _, saliency_map_clean = self.aux_model(image)
+        
+        # Remove batch dimension if present
+        if isinstance(saliency_map_clean, torch.Tensor):
+            saliency_map_clean = saliency_map_clean[0].detach().cpu().numpy()
+        if saliency_map_clean.ndim == 3:
+            # (num_classes, H, W) -> aggregate or use predicted class
+            probs = F.softmax(y_fusion, dim=1)
+            pred = torch.argmax(probs, dim=1).item()
+            saliency_map_clean = saliency_map_clean[pred]
+        
+        # Run multiple times with noise
+        noisy_saliencies = []
+        
+        for run_idx in range(n_runs):
+            # Inject noise
+            noisy_image = self.inject_input_noise(image, sigma)
+            
+            # Get saliency on noisy image
+            with torch.no_grad():
+                y_fusion_noisy, _, _, _, _, saliency_map_noisy = self.aux_model(noisy_image)
+            
+            # Process saliency map
+            if isinstance(saliency_map_noisy, torch.Tensor):
+                saliency_map_noisy = saliency_map_noisy[0].detach().cpu().numpy()
+            if saliency_map_noisy.ndim == 3:
+                probs_noisy = F.softmax(y_fusion_noisy, dim=1)
+                pred_noisy = torch.argmax(probs_noisy, dim=1).item()
+                saliency_map_noisy = saliency_map_noisy[pred_noisy]
+            
+            noisy_saliencies.append(saliency_map_noisy)
+        
+        # Compute statistics
+        noisy_saliencies_array = np.array(noisy_saliencies)  # [n_runs, H, W]
+        mean_saliency = np.mean(noisy_saliencies_array, axis=0)
+        variance_map = np.var(noisy_saliencies_array, axis=0)
+        std_map = np.std(noisy_saliencies_array, axis=0)
+        
+        return {
+            'clean_saliency': saliency_map_clean,
+            'noisy_saliencies': noisy_saliencies,
+            'mean_saliency': mean_saliency,
+            'variance_map': variance_map,
+            'std_map': std_map,
+            'sigma': sigma,
+            'n_runs': n_runs
+        }
+    
+    def compute_prediction_inconsistency(self,
+                                        model,
+                                        dataset,
+                                        noise_levels: list,
+                                        batch_size: int = 2,
+                                        n_runs_per_image: int = 5) -> Dict[str, Any]:
+        """
+        Compute prediction inconsistency (PI) across noise levels.
+        
+        Used for Fig 6: PI(σ) curve comparing with/without DCG.
+        
+        PI(σ) = (1/N) * Σ [predicted_label_i != predicted_label_clean]
+        
+        Args:
+            model: CoolSystem model (or baseline without DCG)
+            dataset: Dataset to evaluate
+            noise_levels: List of noise levels [0.02, 0.04, 0.08]
+            batch_size: Batch size for evaluation
+            n_runs_per_image: Number of runs per image per noise level
+        
+        Returns:
+            Dictionary containing:
+            - 'noise_levels': List of noise levels tested
+            - 'pi_scores': PI scores per noise level
+            - 'per_image_results': Detailed results per image
+        """
+        from torch.utils.data import DataLoader
+        
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True
+        )
+        
+        model.model.eval()
+        model.aux_model.eval()
+        
+        # Store results
+        all_clean_predictions = []
+        all_noisy_predictions = {sigma: [] for sigma in noise_levels}
+        all_labels = []
+        
+        print(f"Computing prediction inconsistency for {len(noise_levels)} noise levels...")
+        
+        # Process each batch
+        for batch_idx, (images, labels) in enumerate(tqdm(dataloader, desc="PI computation")):
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+            
+            # Get clean predictions
+            with torch.no_grad():
+                # Run diffusion for clean image
+                y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = model.aux_model(images)
+                
+                bz, nc, H, W = attn_map.size()
+                bz, np = attns.size()
+                
+                y0_cond = model.guided_prob_map(y0_aux_global, y0_aux_local, bz, nc, np)
+                yT = model.guided_prob_map(
+                    torch.rand_like(y0_aux_global),
+                    torch.rand_like(y0_aux_local),
+                    bz, nc, np
+                )
+                
+                attns = attns.unsqueeze(-1)
+                attns = (attns * attns.transpose(1, 2)).unsqueeze(1)
+                
+                y_pred_clean = model.DiffSampler.sample_high_res(
+                    images, yT, conditions=[y0_cond, patches, attns]
+                )
+                y_pred_clean = y_pred_clean.reshape(bz, nc, np * np)
+                y_pred_clean = y_pred_clean.mean(2)  # [batch_size, num_classes]
+                probs_clean = F.softmax(y_pred_clean, dim=1)
+                preds_clean = torch.argmax(probs_clean, dim=1).cpu().numpy()
+            
+            all_clean_predictions.extend(preds_clean)
+            true_labels = labels.argmax(dim=1) if labels.dim() > 1 else labels
+            all_labels.extend(true_labels.cpu().numpy())
+            
+            # Get noisy predictions for each noise level
+            for sigma in noise_levels:
+                noisy_preds_sigma = []
+                
+                for run_idx in range(n_runs_per_image):
+                    # Inject noise
+                    noisy_images = self.inject_input_noise(images, sigma)
+                    
+                    # Run diffusion on noisy image
+                    with torch.no_grad():
+                        y0_aux_noisy, y0_aux_global_noisy, y0_aux_local_noisy, patches_noisy, attns_noisy, attn_map_noisy = model.aux_model(noisy_images)
+                        
+                        bz_noisy, nc_noisy, H_noisy, W_noisy = attn_map_noisy.size()
+                        bz_noisy, np_noisy = attns_noisy.size()
+                        
+                        y0_cond_noisy = model.guided_prob_map(y0_aux_global_noisy, y0_aux_local_noisy, bz_noisy, nc_noisy, np_noisy)
+                        yT_noisy = model.guided_prob_map(
+                            torch.rand_like(y0_aux_global_noisy),
+                            torch.rand_like(y0_aux_local_noisy),
+                            bz_noisy, nc_noisy, np_noisy
+                        )
+                        
+                        attns_noisy = attns_noisy.unsqueeze(-1)
+                        attns_noisy = (attns_noisy * attns_noisy.transpose(1, 2)).unsqueeze(1)
+                        
+                        y_pred_noisy = model.DiffSampler.sample_high_res(
+                            noisy_images, yT_noisy, conditions=[y0_cond_noisy, patches_noisy, attns_noisy]
+                        )
+                        y_pred_noisy = y_pred_noisy.reshape(bz_noisy, nc_noisy, np_noisy * np_noisy)
+                        y_pred_noisy = y_pred_noisy.mean(2)
+                        probs_noisy = F.softmax(y_pred_noisy, dim=1)
+                        preds_noisy = torch.argmax(probs_noisy, dim=1).cpu().numpy()
+                    
+                    noisy_preds_sigma.append(preds_noisy)
+                
+                # Store for this sigma
+                all_noisy_predictions[sigma].extend(noisy_preds_sigma)
+        
+        # Compute PI scores
+        all_clean_predictions = np.array(all_clean_predictions)
+        pi_scores = []
+        
+        for sigma in noise_levels:
+            # Flatten noisy predictions: [n_images * n_runs]
+            noisy_preds_flat = np.array(all_noisy_predictions[sigma]).flatten()
+            
+            # Repeat clean predictions to match
+            clean_preds_repeated = np.repeat(all_clean_predictions, n_runs_per_image)
+            
+            # Compute inconsistency: fraction of mismatches
+            inconsistent = (noisy_preds_flat != clean_preds_repeated).mean()
+            pi_scores.append(inconsistent)
+        
+        return {
+            'noise_levels': noise_levels,
+            'pi_scores': pi_scores,
+            'n_runs_per_image': n_runs_per_image,
+            'total_images': len(all_clean_predictions)
         }
 

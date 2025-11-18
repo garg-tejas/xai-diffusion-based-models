@@ -249,6 +249,148 @@ class DiffusionExplainer(BaseExplainer):
         
         return prob_map
     
+    def explain_with_hooks(self,
+                           image: torch.Tensor,
+                           label: Optional[int] = None,
+                           track_timesteps: Optional[List[int]] = None,
+                           **kwargs) -> Dict[str, Any]:
+        """
+        Generate explanation with forward hooks to track internal U-Net states.
+        
+        This method registers forward hooks on the ConditionalModel to extract
+        intermediate features and attention weights at specified timesteps.
+        
+        Args:
+            image: Input image tensor
+            label: Ground truth label (optional)
+            track_timesteps: List of timestep values to track (e.g., [900, 700, 500, 300, 100, 10])
+                           If None, uses default timesteps
+            **kwargs: Additional arguments
+            
+        Returns:
+            Dictionary containing trajectory with internal states:
+            - 'trajectory': List with 'cond_weights' and 'feature_maps' at tracked timesteps
+        """
+        # Default timesteps if not specified
+        if track_timesteps is None:
+            track_timesteps = [900, 700, 500, 300, 100, 10]
+        
+        # Preprocess
+        image = self._preprocess_image(image)
+        
+        # Get auxiliary model outputs
+        with torch.no_grad():
+            (y_fusion, y_global, y_local, 
+             patches, patch_attns, saliency_map) = self.aux_model(image)
+        
+        # Prepare guidance conditions
+        bz = image.shape[0]
+        nc = self.model_config.data.num_classes
+        _, _, H, W = saliency_map.shape
+        np_patches = int(np.sqrt(H * W))
+        
+        y0_cond = self._guided_prob_map(y_global, y_local, bz, nc, np_patches)
+        yT = self._guided_prob_map(
+            torch.rand_like(y_global),
+            torch.rand_like(y_local),
+            bz, nc, np_patches
+        )
+        
+        attns = patch_attns.unsqueeze(-1)
+        attns = (attns * attns.transpose(1, 2)).unsqueeze(1)
+        
+        # Run diffusion with hooks
+        trajectory = self._run_diffusion_with_hooks(
+            image, yT, y0_cond, patches, attns,
+            track_timesteps=track_timesteps
+        )
+        
+        # Get standard explanation
+        explanation = self.explain(image, label, track_all_timesteps=False)
+        explanation['trajectory_with_hooks'] = trajectory
+        
+        return explanation
+    
+    def _run_diffusion_with_hooks(self,
+                                  x_batch: torch.Tensor,
+                                  yT: torch.Tensor,
+                                  y0_cond: torch.Tensor,
+                                  patches: torch.Tensor,
+                                  attns: torch.Tensor,
+                                  track_timesteps: List[int]) -> List[Dict]:
+        """
+        Run diffusion with forward hooks to capture internal states.
+        
+        Args:
+            x_batch: Input image
+            yT: Initial noisy state
+            y0_cond: Guidance condition
+            patches: Local patches
+            attns: Attention weights
+            track_timesteps: List of timestep values to track
+            
+        Returns:
+            List of dictionaries with internal states at tracked timesteps
+        """
+        bz, nc, h, w = y0_cond.shape
+        noisy_y = yT.clone()
+        
+        # Storage for hook outputs
+        hook_storage = {}
+        
+        def forward_hook(module, input, output):
+            """Hook on forward pass to extract cond_weight."""
+            if hasattr(module, 'cond_weight'):
+                w = torch.softmax(module.cond_weight, dim=2)
+                hook_storage['cond_weight'] = w.detach().cpu().numpy()
+        
+        hook_handle = self.cond_model.register_forward_hook(forward_hook)
+        
+        trajectory = []
+        
+        for t_idx, t in enumerate(self.scheduler.timesteps):
+            timesteps_batch = t * torch.ones(bz * h * w, dtype=t.dtype, device=x_batch.device)
+            
+            # Clear storage
+            hook_storage.clear()
+            
+            with torch.no_grad():
+                noise_pred = self.cond_model(
+                    x_batch,
+                    torch.cat([y0_cond, noisy_y], dim=1),
+                    timesteps_batch,
+                    patches,
+                    attns
+                )
+            
+            # Denoise
+            prev_noisy_y = noisy_y.clone()
+            noisy_y = self.scheduler.step(
+                model_output=noise_pred,
+                timestep=t,
+                sample=noisy_y
+            ).prev_sample
+            
+            # Check if this timestep should be tracked
+            t_val = int(t.item())
+            if t_val in track_timesteps:
+                probs_spatial = F.softmax(noisy_y, dim=1)
+                probs = probs_spatial.mean(dim=[2, 3])
+                
+                trajectory.append({
+                    'timestep': t_val,
+                    'timestep_idx': t_idx,
+                    'probs': probs[0].detach().cpu().numpy(),
+                    'predicted_class': int(torch.argmax(probs, dim=1).item()),
+                    'cond_weights': hook_storage.get('cond_weight', None),
+                    'spatial_probs': probs_spatial[0].detach().cpu().numpy(),
+                })
+        
+        # Remove hook
+        hook_handle.remove()
+        
+        return trajectory
+
     def _run_diffusion_with_tracking(self,
                                      x_batch: torch.Tensor,
                                      yT: torch.Tensor,

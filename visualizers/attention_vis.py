@@ -33,7 +33,6 @@ from matplotlib.gridspec import GridSpec
 import seaborn as sns
 from typing import Dict, Any, Optional, List, Tuple, Union
 from PIL import Image
-import imageio
 import json
 import base64
 from io import BytesIO
@@ -48,6 +47,13 @@ from xai.utils.image_utils import (
     save_visualization,
     create_multi_panel_figure,
     normalize_to_uint8
+)
+from xai.utils.pdf_utils import (
+    save_figure_as_pdf,
+    save_animation_frames_as_pdf,
+    save_frame_grid_as_image,
+    select_key_frames,
+    apply_publication_style
 )
 
 
@@ -91,10 +97,15 @@ class AttentionVisualizer:
         self.figsize = tuple(config.get('figure_size', [12, 8]))
         self.dpi = config.get('image_dpi', 300)
         self.class_names = config.get('class_names', {})
+        self.save_pdf = config.get('save_pdf', True)
+        
+        # Apply publication style
+        apply_publication_style()
         
         print(f"[AttentionVisualizer] Initialized")
         print(f"  Colormap: {self.colormap}")
         print(f"  Alpha: {self.alpha}")
+        print(f"  PDF export: {self.save_pdf}")
     
     def visualize_attention(self,
                            image: Union[np.ndarray, Image.Image],
@@ -136,14 +147,16 @@ class AttentionVisualizer:
         if patch_attention.ndim == 2:
             patch_attention = patch_attention[0]  # (num_patches,)
         
-        # Create figure with subplots
-        fig = plt.figure(figsize=(20, 5))
-        gs = GridSpec(1, 4, figure=fig, wspace=0.3)
+        # Create figure with improved layout for publication
+        fig = plt.figure(figsize=(16, 4.5))
+        gs = GridSpec(1, 4, figure=fig, 
+                     left=0.05, right=0.95, top=0.88, bottom=0.12,
+                     wspace=0.15, hspace=0.1)
         
         # 1. Original image
         ax1 = fig.add_subplot(gs[0])
         ax1.imshow(image)
-        ax1.set_title('Original Image', fontsize=14, fontweight='bold')
+        ax1.set_title('(a) Original Image', fontsize=11, fontweight='bold', pad=10)
         ax1.axis('off')
         
         # 2. Saliency overlay (class-averaged)
@@ -152,7 +165,7 @@ class AttentionVisualizer:
         saliency_up = upsample_attention(saliency_avg, image.shape[:2])
         overlay = create_heatmap_overlay(image, saliency_up, self.colormap, self.alpha)
         ax2.imshow(overlay)
-        ax2.set_title('Saliency Overlay (Average)', fontsize=14, fontweight='bold')
+        ax2.set_title('(b) Saliency Overlay', fontsize=11, fontweight='bold', pad=10)
         ax2.axis('off')
         
         # 3. Patches highlighted
@@ -171,13 +184,14 @@ class AttentionVisualizer:
             
             img_with_boxes = draw_bounding_boxes(
                 image, boxes, labels=labels,
-                thickness=3, font_scale=0.8
+                thickness=2, font_scale=0.7
             )
             ax3.imshow(img_with_boxes)
-            ax3.set_title(f'Attention Patches (n={len(boxes)})', fontsize=14, fontweight='bold')
+            ax3.set_title(f'(c) Attention Patches (n={len(boxes)})', 
+                         fontsize=11, fontweight='bold', pad=10)
         else:
             ax3.imshow(image)
-            ax3.set_title('No Patch Data', fontsize=14)
+            ax3.set_title('(c) No Patch Data', fontsize=11, pad=10)
         ax3.axis('off')
         
         # 4. Class-specific saliency for predicted class
@@ -190,32 +204,32 @@ class AttentionVisualizer:
         )
         ax4.imshow(class_overlay)
         class_name = self.class_names.get(str(prediction), f"Class {prediction}")
-        ax4.set_title(f'Class-specific: {class_name}', fontsize=14, fontweight='bold')
+        ax4.set_title(f'(d) {class_name} Saliency', fontsize=11, fontweight='bold', pad=10)
         ax4.axis('off')
         
-        # Add overall title
+        # Add overall title with better formatting
         confidence = explanation['confidence']
+        class_name = self.class_names.get(str(prediction), f"Class {prediction}")
         fig.suptitle(
-            f'Attention Visualization | Prediction: {class_name} (confidence: {confidence:.3f})',
-            fontsize=16, fontweight='bold', y=0.98
+            f'Attention Visualization: {class_name} (Confidence: {confidence:.3f})',
+            fontsize=13, fontweight='bold', y=0.96
         )
         
-        # Convert to array - use subplots_adjust for GridSpec layouts to avoid warnings
-        # GridSpec already handles spacing (wspace=0.3), just adjust margins for title
-        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
+        # Convert to array for PNG export
         fig.canvas.draw()
-        
-        # Get figure dimensions
-        width, height = fig.canvas.get_width_height()
-        
         buf = fig.canvas.buffer_rgba()
         vis_array = np.asarray(buf)[:, :, :3]
         
-        plt.close(fig)
-        
-        # Save if requested
+        # Save PNG if requested
         if save_path:
             save_visualization(vis_array, save_path, self.dpi)
+        
+        # Save PDF version if enabled
+        if self.save_pdf and save_path:
+            pdf_path = Path(save_path).with_suffix('.pdf')
+            save_figure_as_pdf(fig, pdf_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.1)
+        
+        plt.close(fig)
         
         return vis_array
     
@@ -651,43 +665,62 @@ class AttentionVisualizer:
             
             plt.close(fig)  # Close immediately
         
-        if save_path is None:
-            save_path = 'attention_evolution.gif'
-        
-        # Verify we have frames
+        # Ensure we have frames
         if len(frames) == 0:
-            raise ValueError("No frames generated for animation")
+            raise ValueError("No frames generated for stacked visualization")
         
-        print(f"[AttentionVisualizer] Collected {len(frames)} frames, saving GIF...")
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
         
-        # Convert frames to PIL Images for better GIF compatibility
-        pil_frames = []
-        for i, frame in enumerate(frames):
-            # Ensure frame is uint8 and in correct shape
-            if frame.dtype != np.uint8:
-                if frame.max() <= 1.0:
-                    frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-                else:
-                    frame = np.clip(frame, 0, 255).astype(np.uint8)
-            
-            # Ensure frame is (H, W, 3)
-            if frame.ndim != 3 or frame.shape[2] != 3:
-                raise ValueError(f"Frame {i} has invalid shape: {frame.shape}")
-            
-            pil_frames.append(Image.fromarray(frame, mode='RGB'))
+        frame_titles = []
+        for idx in frame_indices:
+            attn_data = attention_sequence[idx]
+            timestep = attn_data.get('timestep', idx)
+            pred_class = attn_data.get('predicted_class', -1)
+            if pred_class != -1:
+                class_name = self.class_names.get(str(pred_class), f"Class {pred_class}")
+                frame_titles.append(f"t={timestep}, {class_name}")
+            else:
+                frame_titles.append(f"t={timestep}")
         
-        # Save using PIL's save method - this is more reliable for animated GIFs
-        duration_ms = int(1000 / fps)  # Duration in milliseconds per frame
-        pil_frames[0].save(
+        if save_path is None:
+            save_path = 'attention_evolution.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
             save_path,
-            save_all=True,
-            append_images=pil_frames[1:] if len(pil_frames) > 1 else [],
-            duration=duration_ms,
-            loop=0,
-            format='GIF'
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Attention Evolution Through Diffusion Timesteps',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
         )
+        print(f"[AttentionVisualizer] Stacked frames saved to {save_path}")
         
-        print(f"[AttentionVisualizer] Animation saved to {save_path} with {len(frames)} frames at {fps} fps ({duration_ms}ms per frame)")
+        if self.save_pdf:
+            pdf_path = save_path.with_suffix('.pdf')
+            try:
+                save_animation_frames_as_pdf(
+                    selected_frames,
+                    pdf_path,
+                    layout=layout,
+                    titles=frame_titles,
+                    suptitle='Attention Evolution Through Diffusion Timesteps',
+                    dpi=self.dpi,
+                    frame_size=(3.5, 3.5),
+                    spacing=0.4
+                )
+                print(f"[AttentionVisualizer] PDF with frames saved to {pdf_path}")
+            except Exception as e:
+                print(f"[AttentionVisualizer] Warning: Failed to save PDF: {e}")
+        
         return save_path
 
 

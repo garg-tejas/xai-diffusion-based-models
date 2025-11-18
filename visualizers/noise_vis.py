@@ -39,7 +39,14 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from xai.utils.image_utils import figure_to_array
-from xai.utils.animation_utils import capture_frame, save_frames_as_gif
+from xai.utils.animation_utils import capture_frame
+from xai.utils.pdf_utils import (
+    save_figure_as_pdf,
+    save_animation_frames_as_pdf,
+    save_frame_grid_as_image,
+    select_key_frames,
+    apply_publication_style
+)
 
 
 class NoiseVisualizer:
@@ -65,6 +72,11 @@ class NoiseVisualizer:
         self.colormap = config.get('colormap', 'viridis')
         self.figsize = config.get('figure_size', [12, 8])
         self.class_names = config.get('class_names', {})
+        self.save_pdf = config.get('save_pdf', True)
+        self.dpi = config.get('image_dpi', 300)
+        
+        # Apply publication style
+        apply_publication_style()
         
         if not self.class_names:
             self.class_names = {str(i): f"Class {i}" for i in range(10)}
@@ -307,11 +319,199 @@ class NoiseVisualizer:
             if (frame_idx + 1) % max(1, num_frames // 10) == 0:
                 print(f"  Frame {frame_idx + 1}/{num_frames} captured")
         
-        if save_path is None:
-            save_path = 'noise_evolution.gif'
+        if len(frames) == 0:
+            raise ValueError("No frames generated for noise evolution visualization")
         
-        print(f"[NoiseVisualizer] Saving animation to {save_path}...")
-        save_frames_as_gif(frames, save_path, fps=fps)
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
+        
+        frame_titles = []
+        for idx in frame_indices:
+            step = noise_data[idx]
+            timestep = step.get('timestep', idx)
+            frame_titles.append(f"t={timestep}")
+        
+        if save_path is None:
+            save_path = 'noise_evolution.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
+            save_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Noise Evolution Through Diffusion Timesteps',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[NoiseVisualizer] Stacked noise frames saved to {save_path}")
+        
+        if self.save_pdf:
+            pdf_path = save_path.with_suffix('.pdf')
+            save_animation_frames_as_pdf(
+                selected_frames,
+                pdf_path,
+                layout=layout,
+                titles=frame_titles,
+                suptitle='Noise Evolution Through Diffusion Timesteps',
+                dpi=self.dpi,
+                frame_size=(3.5, 3.5),
+                spacing=0.4
+            )
+            print(f"[NoiseVisualizer] PDF with frames saved to {pdf_path}")
         
         return save_path
+    
+    def create_noise_sensitivity_comparison(self,
+                                           clean_saliency: np.ndarray,
+                                           noisy_saliency: np.ndarray,
+                                           variance_map: np.ndarray,
+                                           save_path: Optional[Path] = None) -> plt.Figure:
+        """
+        Create 3-panel figure showing noise sensitivity (Fig 5).
+        
+        Panels:
+        1. Clean saliency map
+        2. Noisy saliency map (under σ=0.04 noise)
+        3. Variance heatmap (red = brittle regions)
+        
+        Args:
+            clean_saliency: Baseline saliency map (H, W)
+            noisy_saliency: Mean saliency under noise (H, W)
+            variance_map: Variance across N runs (H, W)
+            save_path: Path to save figure (optional)
+        
+        Returns:
+            matplotlib Figure object
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import seaborn as sns
+        
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig.suptitle('Noise Sensitivity Analysis (σ = 0.04)', fontsize=18, fontweight='bold')
+        
+        # Panel 1: Clean saliency
+        im1 = axes[0].imshow(clean_saliency, cmap='jet', aspect='auto')
+        axes[0].set_title('Clean Saliency Map', fontsize=14, fontweight='bold')
+        axes[0].set_xlabel('Width', fontsize=12)
+        axes[0].set_ylabel('Height', fontsize=12)
+        plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+        axes[0].grid(False)
+        
+        # Panel 2: Noisy saliency
+        im2 = axes[1].imshow(noisy_saliency, cmap='jet', aspect='auto')
+        axes[1].set_title('Noisy Saliency Map\n(Mean over N=20 runs)', fontsize=14, fontweight='bold')
+        axes[1].set_xlabel('Width', fontsize=12)
+        axes[1].set_ylabel('Height', fontsize=12)
+        plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+        axes[1].grid(False)
+        
+        # Panel 3: Variance map (red = brittle regions)
+        im3 = axes[2].imshow(variance_map, cmap='hot', aspect='auto')
+        axes[2].set_title('Variance Heatmap\n(Red = Brittle Regions)', fontsize=14, fontweight='bold')
+        axes[2].set_xlabel('Width', fontsize=12)
+        axes[2].set_ylabel('Height', fontsize=12)
+        cbar3 = plt.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04)
+        cbar3.set_label('Variance', fontsize=10)
+        axes[2].grid(False)
+        
+        plt.tight_layout()
+        
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            if self.save_pdf:
+                pdf_path = save_path.with_suffix('.pdf')
+                save_figure_as_pdf(fig, pdf_path)
+            print(f"Saved noise sensitivity comparison to {save_path}")
+        
+        return fig
+    
+    def create_prediction_inconsistency_curve(self,
+                                            pi_with_dcg: Dict[str, Any],
+                                            pi_without_dcg: Optional[Dict[str, Any]] = None,
+                                            save_path: Optional[Path] = None) -> plt.Figure:
+        """
+        Create prediction inconsistency (PI) curve (Fig 6).
+        
+        PI(σ) = (1/N) * Σ [predicted_label_i != predicted_label_clean]
+        
+        Args:
+            pi_with_dcg: Dictionary with 'noise_levels' and 'pi_scores' for DCG model
+            pi_without_dcg: Optional dictionary for ablation (if None, only show DCG)
+            save_path: Path to save figure (optional)
+        
+        Returns:
+            matplotlib Figure object
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import seaborn as sns
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        noise_levels = pi_with_dcg['noise_levels']
+        pi_scores_dcg = pi_with_dcg['pi_scores']
+        
+        # Plot with-DCG curve
+        ax.plot(noise_levels, pi_scores_dcg, 
+               marker='o', markersize=10, linewidth=2.5, 
+               color='#2ca02c', label='With DCG', linestyle='-')
+        
+        # Plot without-DCG curve if provided
+        if pi_without_dcg is not None:
+            pi_scores_no_dcg = pi_without_dcg['pi_scores']
+            ax.plot(noise_levels, pi_scores_no_dcg,
+                   marker='s', markersize=10, linewidth=2.5,
+                   color='#d62728', label='Without DCG', linestyle='--')
+        
+        ax.set_xlabel('Noise Level (σ)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Prediction Inconsistency (PI)', fontsize=14, fontweight='bold')
+        ax.set_title('Prediction Inconsistency Under Input Noise', fontsize=16, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=12, loc='upper left')
+        ax.set_xlim([min(noise_levels) - 0.01, max(noise_levels) + 0.01])
+        ax.set_ylim([0, max(pi_scores_dcg) * 1.1 if pi_without_dcg is None 
+                     else max(max(pi_scores_dcg), max(pi_without_dcg['pi_scores'])) * 1.1])
+        
+        # Add value annotations
+        for i, (sigma, pi) in enumerate(zip(noise_levels, pi_scores_dcg)):
+            ax.annotate(f'{pi:.3f}', 
+                       xy=(sigma, pi), 
+                       xytext=(5, 5), 
+                       textcoords='offset points',
+                       fontsize=10, 
+                       fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        
+        if pi_without_dcg is not None:
+            for i, (sigma, pi) in enumerate(zip(noise_levels, pi_without_dcg['pi_scores'])):
+                ax.annotate(f'{pi:.3f}',
+                           xy=(sigma, pi),
+                           xytext=(5, -15),
+                           textcoords='offset points',
+                           fontsize=10,
+                           fontweight='bold',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        
+        plt.tight_layout()
+        
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            if self.save_pdf:
+                pdf_path = save_path.with_suffix('.pdf')
+                save_figure_as_pdf(fig, pdf_path)
+            print(f"Saved prediction inconsistency curve to {save_path}")
+        
+        return fig
 

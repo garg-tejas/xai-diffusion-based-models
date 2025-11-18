@@ -92,7 +92,11 @@ class ReportGenerator:
                             animation_paths: Optional[Dict[str, str]] = None,
                             guidance_exp: Optional[Dict[str, Any]] = None,
                             feature_exp: Optional[Dict[str, Any]] = None,
-                            noise_exp: Optional[Dict[str, Any]] = None) -> None:
+                            noise_exp: Optional[Dict[str, Any]] = None,
+                            faithfulness_exp: Optional[Dict[str, Any]] = None,
+                            attribution_exp: Optional[Dict[str, Any]] = None,
+                            spatiotemporal_exp: Optional[Dict[str, Any]] = None,
+                            counterfactual_exp: Optional[Dict[str, Any]] = None) -> None:
         """
         Create HTML report for a single sample.
         
@@ -137,6 +141,26 @@ class ReportGenerator:
         # Noise analysis section
         if noise_exp:
             html_content += self._generate_noise_section(noise_exp, visualizations)
+        
+        # XAI-v2 Advanced Analysis Section
+        html_content += '<h2>XAI-v2 Advanced Analysis</h2>'
+        html_content += '<p>Advanced attribution and validation modules focused on explaining the Denoising U-Net\'s decision-making process.</p>'
+        
+        # Faithfulness validation section
+        if faithfulness_exp:
+            html_content += self._generate_faithfulness_section(faithfulness_exp, visualizations)
+        
+        # Conditional attribution section
+        if attribution_exp:
+            html_content += self._generate_attribution_section(attribution_exp, visualizations)
+        
+        # Spatio-temporal trajectory section
+        if spatiotemporal_exp:
+            html_content += self._generate_spatiotemporal_section(spatiotemporal_exp, visualizations)
+        
+        # Counterfactual section
+        if counterfactual_exp:
+            html_content += self._generate_counterfactual_section(counterfactual_exp, visualizations)
         
         # Analysis section
         html_content += self._generate_analysis_section(attention_exp, diffusion_exp, sample_info)
@@ -931,6 +955,232 @@ class ReportGenerator:
                 <h3>Noise Reduction Curve</h3>
                 <p>Noise magnitude evolution showing reduction through denoising steps.</p>
                 <img src="../{vis_path}" alt="Noise Magnitude" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
+    
+    def _generate_faithfulness_section(self, faithfulness_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """Generate HTML section for faithfulness validation."""
+        html = '''
+        <h3>Faithfulness & Robustness Validation</h3>
+        <p>Validates that saliency maps actually highlight pixels the model uses.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        # Metrics
+        deletion_auc = faithfulness_exp.get('deletion_auc', 0.0)
+        insertion_auc = faithfulness_exp.get('insertion_auc', 0.0)
+        robustness = faithfulness_exp.get('robustness_scores', {})
+        
+        html += f'''
+        <div class="metadata-item">
+            <div class="metadata-label">Deletion AUC</div>
+            <div class="metadata-value">{deletion_auc:.3f}</div>
+            <div class="metadata-note">Lower is better (fast drop = faithful)</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Insertion AUC</div>
+            <div class="metadata-value">{insertion_auc:.3f}</div>
+            <div class="metadata-note">Higher is better (fast rise = faithful)</div>
+        </div>
+        '''
+        
+        if robustness:
+            overall = robustness.get('overall_robustness', 0.0)
+            html += f'''
+        <div class="metadata-item">
+            <div class="metadata-label">Overall Robustness</div>
+            <div class="metadata-value">{overall:.3f}</div>
+            <div class="metadata-note">Correlation under augmentations</div>
+        </div>
+            '''
+        
+        # Visualizations
+        if 'faithfulness_curves' in visualizations:
+            vis_path = visualizations['faithfulness_curves']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Insertion/Deletion Curves</h4>
+                <img src="../{vis_path}" alt="Faithfulness Curves" class="visualization-image">
+            </div>
+            '''
+        
+        if 'faithfulness_summary' in visualizations:
+            vis_path = visualizations['faithfulness_summary']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Faithfulness Summary</h4>
+                <img src="../{vis_path}" alt="Faithfulness Summary" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
+    
+    def _generate_attribution_section(self, attribution_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """Generate HTML section for conditional attribution."""
+        html = '''
+        <h3>Conditional Attribution (WHY)</h3>
+        <p>Quantifies reliance on global context vs. local lesions.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        # Attribution scores
+        global_contrib = attribution_exp.get('global_contribution', 0.0)
+        local_contrib = attribution_exp.get('local_contribution', 0.0)
+        dominant_roi = attribution_exp.get('dominant_roi', -1)
+        guidance_strategy = attribution_exp.get('guidance_strategy', 'unknown')
+        
+        html += f'''
+        <div class="metadata-item">
+            <div class="metadata-label">Global Prior Contribution</div>
+            <div class="metadata-value">{global_contrib:.1%}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Local Prior Contribution</div>
+            <div class="metadata-value">{local_contrib:.1%}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Dominant ROI</div>
+            <div class="metadata-value">ROI #{dominant_roi + 1}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Guidance Strategy</div>
+            <div class="metadata-value">{guidance_strategy}</div>
+        </div>
+        '''
+        
+        # Visualizations
+        if 'attribution_bars' in visualizations:
+            vis_path = visualizations['attribution_bars']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Feature Attribution</h4>
+                <img src="../{vis_path}" alt="Attribution Bars" class="visualization-image">
+            </div>
+            '''
+        
+        if 'attribution_comparison' in visualizations:
+            vis_path = visualizations['attribution_comparison']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Attribution Comparison</h4>
+                <img src="../{vis_path}" alt="Attribution Comparison" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
+    
+    def _generate_spatiotemporal_section(self, spatiotemporal_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """Generate HTML section for spatio-temporal trajectory."""
+        html = '''
+        <h3>Spatio-Temporal Trajectory (WHEN & WHERE)</h3>
+        <p>Shows how attention evolves from global to local features over timesteps.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        trajectory = spatiotemporal_exp.get('attention_trajectory', [])
+        if trajectory:
+            # Show evolution summary
+            initial_global = trajectory[0].get('global_attention', 0.0) if trajectory else 0.0
+            final_global = trajectory[-1].get('global_attention', 0.0) if trajectory else 0.0
+            initial_local = trajectory[0].get('local_attention', 0.0) if trajectory else 0.0
+            final_local = trajectory[-1].get('local_attention', 0.0) if trajectory else 0.0
+            
+            html += f'''
+        <div class="metadata-item">
+            <div class="metadata-label">Initial Global Attention</div>
+            <div class="metadata-value">{initial_global:.1%}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Final Global Attention</div>
+            <div class="metadata-value">{final_global:.1%}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Initial Local Attention</div>
+            <div class="metadata-value">{initial_local:.1%}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Final Local Attention</div>
+            <div class="metadata-value">{final_local:.1%}</div>
+        </div>
+            '''
+        
+        # Visualizations
+        if 'attention_evolution' in visualizations:
+            vis_path = visualizations['attention_evolution']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Attention Evolution</h4>
+                <img src="../{vis_path}" alt="Attention Evolution" class="visualization-image">
+            </div>
+            '''
+        
+        if 'coarse_to_fine' in visualizations:
+            vis_path = visualizations['coarse_to_fine']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Coarse-to-Fine Transition</h4>
+                <img src="../{vis_path}" alt="Coarse-to-Fine" class="visualization-image">
+            </div>
+            '''
+        
+        html += '''
+        </div>
+        <div class="section-separator"></div>
+        '''
+        return html
+    
+    def _generate_counterfactual_section(self, counterfactual_exp: Dict[str, Any], visualizations: Dict[str, Any]) -> str:
+        """Generate HTML section for counterfactual explanation."""
+        html = '''
+        <h3>Generative Counterfactual (WHAT-IF)</h3>
+        <p>Shows minimal visual evidence needed to change the prediction.</p>
+        <div class="visualizations-grid">
+        '''
+        
+        original_pred = counterfactual_exp.get('original_prediction', -1)
+        counterfactual_pred = counterfactual_exp.get('counterfactual_prediction', -1)
+        target_class = counterfactual_exp.get('target_class', -1)
+        
+        orig_name = self.class_names.get(str(original_pred), f"Class {original_pred}")
+        cf_name = self.class_names.get(str(counterfactual_pred), f"Class {counterfactual_pred}")
+        target_name = self.class_names.get(str(target_class), f"Class {target_class}")
+        
+        html += f'''
+        <div class="metadata-item">
+            <div class="metadata-label">Original Prediction</div>
+            <div class="metadata-value">{orig_name}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Target Class</div>
+            <div class="metadata-value">{target_name}</div>
+        </div>
+        <div class="metadata-item">
+            <div class="metadata-label">Counterfactual Prediction</div>
+            <div class="metadata-value">{cf_name}</div>
+        </div>
+        '''
+        
+        # Visualization
+        if 'counterfactual_comparison' in visualizations:
+            vis_path = visualizations['counterfactual_comparison']
+            html += f'''
+            <div class="visualization-item">
+                <h4>Counterfactual Comparison</h4>
+                <img src="../{vis_path}" alt="Counterfactual" class="visualization-image">
             </div>
             '''
         

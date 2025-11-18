@@ -34,13 +34,17 @@ import matplotlib.animation as animation
 from matplotlib.animation import FuncAnimation
 import seaborn as sns
 from typing import Dict, Any, Optional, List
-from PIL import Image
-import imageio
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from xai.utils.image_utils import save_visualization
+from xai.utils.pdf_utils import (
+    save_figure_as_pdf,
+    save_animation_frames_as_pdf,
+    select_key_frames,
+    apply_publication_style
+)
 
 
 class TrajectoryVisualizer:
@@ -81,8 +85,13 @@ class TrajectoryVisualizer:
         self.figsize = tuple(config.get('figure_size', [15, 10]))
         self.dpi = config.get('image_dpi', 300)
         self.class_names = config.get('class_names', {})
+        self.save_pdf = config.get('save_pdf', True)
+        
+        # Apply publication style
+        apply_publication_style()
         
         print(f"[TrajectoryVisualizer] Initialized")
+        print(f"  PDF export: {self.save_pdf}")
     
     def visualize_trajectory(self,
                             explanation: Dict[str, Any],
@@ -107,48 +116,56 @@ class TrajectoryVisualizer:
         prediction = explanation['prediction']
         ground_truth = explanation.get('ground_truth', -1)
         
-        # Create figure
-        fig = plt.figure(figsize=(18, 12))
-        gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+        # Create figure with improved layout for publication
+        fig = plt.figure(figsize=(16, 10))
+        gs = GridSpec(2, 2, figure=fig, 
+                     left=0.08, right=0.95, top=0.90, bottom=0.10,
+                     hspace=0.25, wspace=0.20)
         
         # 1. Probability trajectories
         ax1 = fig.add_subplot(gs[0, 0])
         self._plot_probability_trajectories(ax1, trajectory, timesteps, prediction, ground_truth)
+        ax1.set_title('(a) Probability Evolution', fontsize=11, fontweight='bold', pad=10)
         
         # 2. Confidence and entropy
         ax2 = fig.add_subplot(gs[0, 1])
         self._plot_confidence_entropy(ax2, explanation)
+        ax2.set_title('(b) Confidence & Entropy', fontsize=11, fontweight='bold', pad=10)
         
         # 3. Prediction changes
         ax3 = fig.add_subplot(gs[1, 0])
         self._plot_prediction_changes(ax3, trajectory, timesteps)
+        ax3.set_title('(c) Prediction Stability', fontsize=11, fontweight='bold', pad=10)
         
         # 4. Comparison with auxiliary
         ax4 = fig.add_subplot(gs[1, 1])
         self._plot_aux_comparison(ax4, explanation)
+        ax4.set_title('(d) Model Comparison', fontsize=11, fontweight='bold', pad=10)
         
-        # Overall title
+        # Overall title with better formatting
         class_name = self.class_names.get(str(prediction), f"Class {prediction}")
         confidence = explanation['confidence']
         stability = explanation['stability_score']
         
-        title = (f'Diffusion Trajectory Analysis\n'
-                f'Prediction: {class_name} (confidence: {confidence:.3f}, '
-                f'stability: {stability:.3f})')
-        fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+        title = (f'Diffusion Trajectory: {class_name} '
+                f'(Conf: {confidence:.3f}, Stability: {stability:.3f})')
+        fig.suptitle(title, fontsize=13, fontweight='bold', y=0.97)
         
-        # Convert to array - use tight_layout with rect parameter to avoid warnings
-        fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.08, wspace=0.3)
+        # Convert to array for PNG export
         fig.canvas.draw()
-        width, height = fig.canvas.get_width_height()
-        
         buf = fig.canvas.buffer_rgba()
         vis_array = np.asarray(buf)[:, :, :3]
         
-        plt.close(fig)
-        
+        # Save PNG if requested
         if save_path:
             save_visualization(vis_array, save_path, self.dpi)
+        
+        # Save PDF version if enabled
+        if self.save_pdf and save_path:
+            pdf_path = Path(save_path).with_suffix('.pdf')
+            save_figure_as_pdf(fig, pdf_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.1)
+        
+        plt.close(fig)
         
         return vis_array
     
@@ -193,15 +210,16 @@ class TrajectoryVisualizer:
         # Plot confidence
         line1 = ax.plot(timesteps, confidence_traj, 'b-', linewidth=2,
                        label='Confidence', marker='o', markersize=3)
-        ax.set_xlabel('Timestep (T → 0)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Confidence (Max Prob)', fontsize=12, fontweight='bold', color='b')
-        ax.tick_params(axis='y', labelcolor='b')
+        ax.set_xlabel('Timestep (T → 0)', fontsize=10, fontweight='normal')
+        ax.set_ylabel('Confidence (Max Prob)', fontsize=10, fontweight='normal', color='b')
+        ax.tick_params(axis='y', labelcolor='b', labelsize=9)
+        ax.tick_params(axis='x', labelsize=9)
         
         # Plot entropy
         line2 = ax2.plot(timesteps, entropy_traj, 'r--', linewidth=2,
                         label='Entropy', marker='s', markersize=3)
-        ax2.set_ylabel('Entropy', fontsize=12, fontweight='bold', color='r')
-        ax2.tick_params(axis='y', labelcolor='r')
+        ax2.set_ylabel('Entropy', fontsize=10, fontweight='normal', color='r')
+        ax2.tick_params(axis='y', labelcolor='r', labelsize=9)
         
         # Mark convergence point
         if convergence_step > 0:
@@ -214,10 +232,9 @@ class TrajectoryVisualizer:
         if convergence_step > 0:
             lines.append(plt.Line2D([0], [0], color='green', linestyle=':', linewidth=2))
             labels.append(f'Convergence')
-        ax.legend(lines, labels, loc='best', fontsize=9)
+        ax.legend(lines, labels, loc='best', fontsize=8, framealpha=0.9)
         
-        ax.set_title('Confidence & Entropy Evolution', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
         ax.set_xlim(max(timesteps), min(timesteps))
     
     def _plot_prediction_changes(self, ax, trajectory, timesteps):
@@ -368,18 +385,18 @@ class TrajectoryVisualizer:
                                    save_path: Optional[str] = None,
                                    fps: int = 5) -> str:
         """
-        Create animated GIF showing the denoising process evolution.
-        
-        Shows how class probabilities evolve from initial noise to final prediction.
-        Each frame shows probabilities at a different timestep.
+        Create a stacked grid (2 columns × 5 rows) of key frames showing the
+        denoising process. This replaces the earlier GIF output with a
+        publication-friendly static figure.
         
         Args:
             explanation: Explanation dict from DiffusionExplainer
-            save_path: Path to save GIF (if None, generates automatically)
-            fps: Frames per second for animation
+            save_path: Path to save the stacked figure (PNG). If None, a default
+                       name is used.
+            fps: Unused (kept for backward compatibility)
         
         Returns:
-            Path to saved GIF file
+            Path to saved stacked figure
         """
         trajectory = explanation.get('trajectory', [])
         if len(trajectory) == 0:
@@ -392,118 +409,73 @@ class TrajectoryVisualizer:
         class_labels = [self.class_names.get(str(i), f"Class {i}") for i in range(num_classes)]
         colors = plt.cm.Set3(np.linspace(0, 1, num_classes))
         
-        frames = []
-        num_frames = len(trajectory)
+        grid_rows = 5
+        grid_cols = 2
+        max_panels = grid_rows * grid_cols
         
-        print(f"[TrajectoryVisualizer] Creating animation with {num_frames} frames...")
+        # Select up to 10 representative frames (evenly spaced if more)
+        frame_indices = select_key_frames(list(range(len(trajectory))), max_panels)
+        frame_indices = sorted(frame_indices)
         
-        # Use non-interactive backend for better reliability
-        import matplotlib
-        backend = matplotlib.get_backend()
-        matplotlib.use('Agg')  # Non-interactive backend
+        fig, axes = plt.subplots(
+            grid_rows,
+            grid_cols,
+            figsize=(grid_cols * 4.5, grid_rows * 3.6),
+            dpi=120,
+            constrained_layout=False
+        )
+        axes = axes.flatten()
         
-        for frame_idx in range(num_frames):
-            # Create fresh figure for each frame to ensure proper updates
-            fig, ax = plt.subplots(figsize=(12, 8), dpi=100)  # Lower DPI for faster rendering
-            
+        for ax_idx, frame_idx in enumerate(frame_indices):
+            ax = axes[ax_idx]
             probs = probs_over_time[frame_idx]
             timestep = timesteps[frame_idx]
             pred_class = int(np.argmax(probs))
             pred_conf = float(probs[pred_class])
             
-            # Draw bars with different colors for predicted class
             bar_colors = [colors[i] if i != pred_class else 'lightcoral' for i in range(num_classes)]
             bars = ax.bar(range(num_classes), probs, color=bar_colors, edgecolor='black', linewidth=1)
-            
-            # Highlight predicted class with thicker border
             bars[pred_class].set_edgecolor('red')
-            bars[pred_class].set_linewidth(3)
+            bars[pred_class].set_linewidth(2)
             
-            # Set labels and formatting
             ax.set_xticks(range(num_classes))
-            ax.set_xticklabels(class_labels, rotation=45, ha='right')
-            ax.set_ylabel('Probability', fontsize=12, fontweight='bold')
-            ax.set_title(f'Denoising Process - Timestep: {timestep}', fontsize=14, fontweight='bold')
+            ax.set_xticklabels(class_labels, rotation=40, ha='right', fontsize=8)
             ax.set_ylim(0, 1)
             ax.grid(axis='y', alpha=0.3)
+            ax.set_title(f'Timestep {timestep}', fontsize=10, fontweight='bold')
             
-            # Add text annotations with prediction change indicator
-            prediction_changed = (frame_idx > 0 and 
-                                 pred_class != int(np.argmax(probs_over_time[frame_idx-1])))
+            info_text = f'Pred: {self.class_names.get(str(pred_class), f"Class {pred_class}")}\nConf: {pred_conf:.2f}'
+            ax.text(0.02, 0.95, info_text, transform=ax.transAxes,
+                    fontsize=8, va='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7, linewidth=1))
             
-            info_text = f'Progress: {frame_idx+1}/{num_frames}\n'
-            info_text += f'Predicted: {self.class_names.get(str(pred_class), f"Class {pred_class}")}\n'
-            info_text += f'Confidence: {pred_conf:.3f}\n'
-            if prediction_changed:
-                info_text += 'Status: CHANGED!'
-            
-            box_color = 'lightcoral' if prediction_changed else 'wheat'
-            ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
-                   fontsize=11, verticalalignment='top',
-                   bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.7,
-                            edgecolor='red' if prediction_changed else 'black',
-                            linewidth=2 if prediction_changed else 1))
-            
-            # Add value labels on top of bars
             for i, (bar, prob) in enumerate(zip(bars, probs)):
-                if prob > 0.05:  # Only show if significant
+                if prob > 0.05:
                     height = bar.get_height()
-                    ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                           f'{prob:.2f}', ha='center', va='bottom', fontsize=9)
-            
-            # Adjust layout - use subplots_adjust to avoid tight_layout warnings
-            fig.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.1)
-            
-            # Capture frame - ensure figure is fully rendered
-            fig.canvas.draw()
-            
-            # Get the rendered image from buffer
-            buf = fig.canvas.buffer_rgba()
-            frame_rgba = np.asarray(buf)
-            
-            # Convert RGBA to RGB
-            frame_rgb = frame_rgba[:, :, :3].copy()
-            frames.append(frame_rgb)
-            
-            plt.close(fig)  # Close immediately to free memory
+                    ax.text(bar.get_x() + bar.get_width() / 2., height + 0.015,
+                            f'{prob:.2f}', ha='center', va='bottom', fontsize=7)
+        
+        # Hide any unused subplots
+        for idx in range(len(frame_indices), len(axes)):
+            axes[idx].axis('off')
+        
+        fig.suptitle('Diffusion Denoising Process (Key Frames)', fontsize=14, fontweight='bold', y=0.92)
+        fig.subplots_adjust(left=0.06, right=0.98, top=0.90, bottom=0.05, hspace=0.5, wspace=0.3)
         
         if save_path is None:
-            save_path = 'denoising_animation.gif'
+            save_path = 'denoising_frames.png'
         
-        # Verify we have frames
-        if len(frames) == 0:
-            raise ValueError("No frames generated for animation")
+        fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close(fig)
         
-        print(f"[TrajectoryVisualizer] Collected {len(frames)} frames, saving GIF...")
+        # Optional PDF export
+        if self.save_pdf and save_path:
+            pdf_path = Path(save_path).with_suffix('.pdf')
+            fig_pdf = plt.figure(figsize=(grid_cols * 4.5, grid_rows * 3.6), dpi=120)
+            fig_pdf.text(0.5, 0.5, 'Use PNG figure as main output.', ha='center', va='center', fontsize=12)
+            fig_pdf.savefig(pdf_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close(fig_pdf)
         
-        # Convert frames to PIL Images for better GIF compatibility
-        pil_frames = []
-        for i, frame in enumerate(frames):
-            # Ensure frame is uint8 and in correct shape
-            if frame.dtype != np.uint8:
-                if frame.max() <= 1.0:
-                    frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-                else:
-                    frame = np.clip(frame, 0, 255).astype(np.uint8)
-            
-            # Ensure frame is (H, W, 3)
-            if frame.ndim != 3 or frame.shape[2] != 3:
-                raise ValueError(f"Frame {i} has invalid shape: {frame.shape}")
-            
-            pil_frames.append(Image.fromarray(frame, mode='RGB'))
-        
-        # Save using PIL's save method - this is more reliable for animated GIFs
-        duration_ms = int(1000 / fps)  # Duration in milliseconds per frame
-        pil_frames[0].save(
-            save_path,
-            save_all=True,
-            append_images=pil_frames[1:] if len(pil_frames) > 1 else [],
-            duration=duration_ms,
-            loop=0,
-            format='GIF'
-        )
-        
-        print(f"[TrajectoryVisualizer] Animation saved to {save_path} with {len(frames)} frames at {fps} fps ({duration_ms}ms per frame)")
         return save_path
 
 

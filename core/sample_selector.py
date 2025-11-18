@@ -64,7 +64,7 @@ class SampleSelector:
         Initialize the sample selector.
         
         Args:
-            csv_path: Path to CSV file with columns ['img_path', 'pred', 'correct', 'label']
+            csv_path: Path to CSV file with columns ['image_path', 'predicted_label', 'correct', 'true_label']
             num_classes: Number of classes in the dataset
             random_seed: Random seed for reproducibility
         
@@ -87,7 +87,7 @@ class SampleSelector:
         self.df = pd.read_csv(self.csv_path)
         
         # Validate CSV structure
-        required_cols = ['img_path', 'pred', 'correct', 'label']
+        required_cols = ['image_path', 'predicted_label', 'correct', 'true_label']
         missing_cols = [col for col in required_cols if col not in self.df.columns]
         if missing_cols:
             raise ValueError(f"CSV missing required columns: {missing_cols}")
@@ -108,7 +108,7 @@ class SampleSelector:
         print(f"\n  Per-class breakdown:")
         
         for class_id in range(self.num_classes):
-            class_df = self.df[self.df['label'] == class_id]
+            class_df = self.df[self.df['true_label'] == class_id]
             class_total = len(class_df)
             class_correct = class_df['correct'].sum()
             class_acc = class_correct / class_total if class_total > 0 else 0
@@ -159,7 +159,7 @@ class SampleSelector:
         
         for class_id in range(self.num_classes):
             # Get all samples for this class
-            class_df = self.df[self.df['label'] == class_id]
+            class_df = self.df[self.df['true_label'] == class_id]
             
             if len(class_df) == 0:
                 print(f"  Warning: No samples found for class {class_id}")
@@ -268,11 +268,11 @@ class SampleSelector:
             - Add similarity to other samples
         """
         return {
-            'img_path': sample_row['img_path'],
-            'prediction': int(sample_row['pred']),
-            'ground_truth': int(sample_row['label']),
+            'image_path': sample_row['image_path'],
+            'prediction': int(sample_row['predicted_label']),
+            'ground_truth': int(sample_row['true_label']),
             'is_correct': bool(sample_row['correct']),
-            'class_name': self._get_class_name(int(sample_row['label']))
+            'class_name': self._get_class_name(int(sample_row['true_label']))
         }
     
     def _get_class_name(self, class_id: int) -> str:
@@ -348,7 +348,7 @@ samples = selector.select_samples(
 # Get info for a specific sample
 for idx, row in samples.iterrows():
     info = selector.get_sample_info(row)
-    print(f"Sample: {info['img_path']}")
+    print(f"Sample: {info['image_path']}")
     print(f"  Predicted: {info['prediction']}, Ground truth: {info['ground_truth']}")
     print(f"  Correct: {info['is_correct']}")
 
@@ -373,7 +373,7 @@ Future Extensions:
 
 4. Active learning integration:
    - Select most informative samples for human review
-   - Prioritize samples that would improve model if relabeled
-   - Identify potential label errors in dataset
+   - Prioritize samples that would improve model if retrue_labeled
+   - Identify potential true_label errors in dataset
 """
 

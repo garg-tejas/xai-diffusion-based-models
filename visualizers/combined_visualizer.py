@@ -38,8 +38,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from xai.utils.image_utils import create_heatmap_overlay, upsample_attention
 from xai.utils.animation_utils import (
     capture_frame, create_subplot_grid, add_timestep_indicator,
-    add_prediction_indicator, save_frames_as_gif
+    add_prediction_indicator
 )
+from xai.utils.pdf_utils import save_frame_grid_as_image, save_animation_frames_as_pdf, select_key_frames
 
 
 class CombinedVisualizer:
@@ -316,11 +317,48 @@ denoising steps.
             frames.append(frame)
             plt.close(fig)
         
-        # Save as GIF
-        print(f"[CombinedVisualizer] Saving synchronized animation to {save_path}...")
-        save_frames_as_gif(frames, save_path, fps=fps)
+        if len(frames) == 0:
+            raise ValueError("No frames generated for synchronized visualization")
         
-        print(f"[CombinedVisualizer] Synchronized animation saved with {num_frames} frames at {fps} fps")
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
+        
+        frame_titles = [f"Frame {i + 1}" for i in range(len(selected_frames))]
+        
+        if save_path is None:
+            save_path = 'synchronized_frames.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
+            save_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Synchronized Diffusion Analysis',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[CombinedVisualizer] Stacked synchronized frames saved to {save_path}")
+        
+        pdf_path = save_path.with_suffix('.pdf')
+        save_animation_frames_as_pdf(
+            selected_frames,
+            pdf_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Synchronized Diffusion Analysis',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[CombinedVisualizer] PDF with synchronized frames saved to {pdf_path}")
+        
         return save_path
     
     def create_image_denoising_sequence(self,
@@ -425,11 +463,56 @@ denoising steps.
             frames.append(frame)
             plt.close(fig)
         
-        # Save as GIF
-        print(f"[CombinedVisualizer] Saving image denoising sequence to {save_path}...")
-        save_frames_as_gif(frames, save_path, fps=fps)
+        if len(frames) == 0:
+            raise ValueError("No frames generated for denoising sequence")
         
-        print(f"[CombinedVisualizer] Image denoising sequence saved with {num_frames} frames")
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
+        
+        frame_titles = []
+        for idx in frame_indices:
+            step_data = trajectory[idx]
+            timestep = step_data['timestep']
+            probs = step_data['probs']
+            prediction = int(np.argmax(probs))
+            confidence = float(probs[prediction])
+            class_name = self.class_names.get(str(prediction), f"Class {prediction}")
+            frame_titles.append(f"t={timestep}, {class_name} ({confidence:.2f})")
+        
+        if save_path is None:
+            save_path = 'denoising_sequence.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
+            save_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Image Denoising Sequence',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[CombinedVisualizer] Stacked denoising frames saved to {save_path}")
+        
+        pdf_path = save_path.with_suffix('.pdf')
+        save_animation_frames_as_pdf(
+            selected_frames,
+            pdf_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Image Denoising Sequence',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[CombinedVisualizer] PDF with denoising frames saved to {pdf_path}")
+        
         return save_path
 
 

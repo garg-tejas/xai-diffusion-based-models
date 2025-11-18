@@ -127,26 +127,34 @@ class FeaturePriorExplainer(BaseExplainer):
         prediction = int(torch.argmax(probs_fusion, dim=0).item())
         confidence = float(probs_fusion[prediction].item())
         
+        # Convert to numpy for storage
+        # raw_features: [B, feature_dim] -> [feature_dim] for batch_size=1
+        # roi_features: [B, N_p, feature_dim] -> [N_p, feature_dim] for batch_size=1
+        # fused_features: [B, feature_dim] -> [feature_dim] for batch_size=1
+        raw_features_np = raw_features[0].detach().cpu().numpy() if raw_features.shape[0] == 1 else raw_features.detach().cpu().numpy()
+        roi_features_np = roi_features[0].detach().cpu().numpy() if roi_features.shape[0] == 1 else roi_features.detach().cpu().numpy()
+        fused_features_np = fused_features[0].detach().cpu().numpy() if fused_features.shape[0] == 1 else fused_features.detach().cpu().numpy()
+        
         explanation = self.get_explanation_dict(
             explanation_type='feature_prior',
             prediction=prediction,
             confidence=confidence,
             
             # Feature data
-            raw_features=raw_features.detach().cpu().numpy(),
-            roi_features=roi_features.detach().cpu().numpy(),
+            raw_features=raw_features_np,
+            roi_features=roi_features_np,
             fusion_weights=fusion_weights.detach().cpu().numpy(),
-            fused_features=fused_features.detach().cpu().numpy(),
+            fused_features=fused_features_np,
             contribution_scores=contribution_scores,
             
             # Feature statistics
-            raw_feature_norm=np.linalg.norm(raw_features.detach().cpu().numpy()),
-            roi_feature_norm=np.linalg.norm(roi_features.detach().cpu().numpy()),
-            fusion_weight_norm=np.linalg.norm(fusion_weights.detach().cpu().numpy()),
+            raw_feature_norm=float(np.linalg.norm(raw_features_np)),
+            roi_feature_norm=float(np.linalg.norm(roi_features_np)),
+            fusion_weight_norm=float(np.linalg.norm(fusion_weights.detach().cpu().numpy())),
             
             # Patch information
-            num_patches=patches.shape[1] if patches is not None else 0,
-            patch_attention=patch_attns[0].detach().cpu().numpy() if patch_attns is not None else None,
+            num_patches=int(patches.shape[1]) if patches is not None else 0,
+            patch_attention=patch_attns[0].detach().cpu().numpy() if patch_attns is not None and len(patch_attns) > 0 else None,
             
             # Ground truth
             ground_truth=label if label is not None else -1
@@ -174,22 +182,49 @@ class FeaturePriorExplainer(BaseExplainer):
         encoder_x_l = self.cond_model.encoder_x_l
         
         # Extract raw features (Transformer encoder)
+        # Note: encoder_x returns [B, feature_dim] (flattened), not spatial features
         with torch.no_grad():
-            raw_features = encoder_x(image)  # [B, feature_dim, H', W']
+            raw_features = encoder_x(image)  # [B, feature_dim]
+            
+        # GroupNorm expects at least 3D: [B, C, ...]
+        # Add spatial dimensions for normalization, then remove them
+        if raw_features.ndim == 2:
+            raw_features = raw_features.unsqueeze(-1).unsqueeze(-1)  # [B, feature_dim, 1, 1]
+            raw_features = self.cond_model.norm(raw_features)
+            raw_features = raw_features.squeeze(-1).squeeze(-1)  # [B, feature_dim]
+        else:
             raw_features = self.cond_model.norm(raw_features)
         
         # Extract ROI features (CNN encoder)
+        # Patches shape: [B, N_p, I, J] where I, J are patch height and width
+        if patches is None:
+            raise ValueError("Patches are None. Cannot extract ROI features.")
+        
         bz, np, I, J = patches.shape
         
-        # Reshape patches for encoder
-        patches_reshaped = patches.view(bz * np, I, J).unsqueeze(1).expand(-1, 3, -1, -1)
+        # Move patches to device if needed
+        patches = patches.to(self.device)
+        
+        # Reshape patches for encoder (same as in ConditionalModel.forward)
+        # View to [B*N_p, I, J], add channel dim [B*N_p, 1, I, J], expand to 3 channels [B*N_p, 3, I, J]
+        patches_reshaped = patches.contiguous().view(bz * np, I, J).unsqueeze(1)  # [B*N_p, 1, I, J]
+        patches_reshaped = patches_reshaped.expand(-1, 3, -1, -1).contiguous()  # [B*N_p, 3, I, J]
         
         with torch.no_grad():
-            roi_features = encoder_x_l(patches_reshaped)  # [B*N_p, feature_dim, H'', W'']
+            roi_features = encoder_x_l(patches_reshaped)  # [B*N_p, feature_dim]
+            
+        # GroupNorm expects at least 3D: [B, C, ...]
+        # The encoder returns 2D [B*N_p, feature_dim], so we need to add spatial dims for norm
+        if roi_features.ndim == 2:
+            # Add spatial dimensions: [B*N_p, feature_dim] -> [B*N_p, feature_dim, 1, 1]
+            roi_features_4d = roi_features.unsqueeze(-1).unsqueeze(-1)
+            roi_features_normalized = self.cond_model.norm_l(roi_features_4d)
+            roi_features = roi_features_normalized.squeeze(-1).squeeze(-1)  # Back to [B*N_p, feature_dim]
+        else:
             roi_features = self.cond_model.norm_l(roi_features)
         
-        # Reshape ROI features
-        roi_features = roi_features.view(bz, np, roi_features.shape[1])  # [B, N_p, feature_dim]
+        # Reshape ROI features back to batch format: [B*N_p, feature_dim] -> [B, N_p, feature_dim]
+        roi_features = roi_features.view(bz, np, -1)
         
         # Get fusion weights
         fusion_weights = self.cond_model.cond_weight  # [1, feature_dim, 7]
@@ -205,38 +240,37 @@ class FeaturePriorExplainer(BaseExplainer):
         Fuse raw and ROI features using learnable weights.
         
         This replicates the fusion process in ConditionalModel.forward().
+        In the model: x (raw) is [B, feature_dim] and x_l (roi) is [B, N_p, feature_dim]
+        They are concatenated: x = torch.cat([x.unsqueeze(-1), x_l.permute(0,2,1)], dim=-1)
+        Then weighted sum: x_weight = torch.sum(x * w, dim=-1)
         
         Args:
-            raw_features: Raw features [B, feature_dim, H, W]
+            raw_features: Raw features [B, feature_dim]
             roi_features: ROI features [B, N_p, feature_dim]
             fusion_weights: Fusion weights [1, feature_dim, K+1] where K+1 = N_p+1
             
         Returns:
-            Fused features [B, feature_dim, H, W]
+            Fused features [B, feature_dim]
         """
         bz = raw_features.shape[0]
         feature_dim = raw_features.shape[1]
+        np = roi_features.shape[1]
         
-        # Prepare raw features: add spatial dimension for concatenation
-        # In the model: x = torch.cat([x.unsqueeze(-1), x_l], dim=-1)
-        # x is [B, feature_dim, H, W] -> unsqueeze to [B, feature_dim, H, W, 1]
-        # x_l is [B, N_p, feature_dim] -> reshape and permute
+        # Replicate the fusion from ConditionalModel.forward()
+        # x_l is reshaped: [B, N_p, feature_dim] -> [B, feature_dim, N_p]
+        roi_features_permuted = roi_features.permute(0, 2, 1)  # [B, feature_dim, N_p]
         
-        # For visualization, we'll compute a simplified fusion
-        # that shows how features are combined
+        # Concatenate raw and ROI features along last dimension
+        # x.unsqueeze(-1) gives [B, feature_dim, 1]
+        # x_l gives [B, feature_dim, N_p]
+        # Concatenated: [B, feature_dim, N_p+1]
+        raw_features_expanded = raw_features.unsqueeze(-1)  # [B, feature_dim, 1]
+        concatenated_features = torch.cat([raw_features_expanded, roi_features_permuted], dim=-1)  # [B, feature_dim, N_p+1]
         
-        # Average pool raw features to get global representation
-        raw_global = F.adaptive_avg_pool2d(raw_features, (1, 1)).squeeze(-1).squeeze(-1)  # [B, feature_dim]
-        
-        # Average ROI features
-        roi_avg = roi_features.mean(dim=1)  # [B, feature_dim]
-        
-        # Combine using fusion weights (simplified)
-        # In actual model, this happens spatially, but for explanation we use averages
-        fused = (raw_global + roi_avg) / 2  # Simplified fusion
-        
-        # Expand back to spatial dimensions
-        fused = fused.unsqueeze(-1).unsqueeze(-1).expand_as(raw_features)
+        # Apply fusion weights (already softmaxed)
+        # w is [1, feature_dim, N_p+1], concatenated_features is [B, feature_dim, N_p+1]
+        # Weighted sum: [B, feature_dim]
+        fused = torch.sum(concatenated_features * fusion_weights, dim=-1)  # [B, feature_dim]
         
         return fused
     

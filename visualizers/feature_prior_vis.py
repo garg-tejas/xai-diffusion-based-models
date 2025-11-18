@@ -43,7 +43,14 @@ from sklearn.manifold import TSNE
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from xai.utils.image_utils import figure_to_array
-from xai.utils.animation_utils import capture_frame, save_frames_as_gif
+from xai.utils.animation_utils import capture_frame
+from xai.utils.pdf_utils import (
+    save_figure_as_pdf,
+    save_animation_frames_as_pdf,
+    save_frame_grid_as_image,
+    select_key_frames,
+    apply_publication_style
+)
 
 
 class FeaturePriorVisualizer:
@@ -68,6 +75,11 @@ class FeaturePriorVisualizer:
         self.colormap = config.get('colormap', 'viridis')
         self.figsize = config.get('figure_size', [12, 8])
         self.class_names = config.get('class_names', {})
+        self.save_pdf = config.get('save_pdf', True)
+        self.dpi = config.get('image_dpi', 300)
+        
+        # Apply publication style
+        apply_publication_style()
         
         if not self.class_names:
             self.class_names = {str(i): f"Class {i}" for i in range(10)}
@@ -240,14 +252,35 @@ class FeaturePriorVisualizer:
         ])
         
         # Reduce dimensionality
-        if method == 'pca':
+        n_samples = len(all_features)
+        
+        if method.lower() == 'pca':
+            # PCA: Best for small sample sizes, interpretable, deterministic
             reducer = PCA(n_components=2, random_state=42)
             reduced = reducer.fit_transform(all_features)
             explained_var = reducer.explained_variance_ratio_.sum()
-        else:
-            reducer = TSNE(n_components=2, random_state=42, perplexity=min(30, len(all_features)-1))
+        elif method.lower() == 'tsne':
+            # t-SNE: Requires at least 4 feature vectors (perplexity must be < n_samples)
+            # Note: n_samples = 1 raw feature + N ROI features (typically ~7 total per image)
+            # Warning: t-SNE can be unreliable with < 10 feature vectors
+            if n_samples < 4:
+                raise ValueError(
+                    f"t-SNE requires at least 4 feature vectors, but got {n_samples} "
+                    f"(1 raw + {n_samples-1} ROI features). Use PCA instead."
+                )
+            if n_samples < 10:
+                import warnings
+                warnings.warn(
+                    f"t-SNE with only {n_samples} feature vectors (1 raw + {n_samples-1} ROI) "
+                    f"may produce unstable results. Consider using PCA for better reliability.",
+                    UserWarning
+                )
+            perplexity = min(30, max(5, n_samples - 1))  # Ensure valid perplexity range
+            reducer = TSNE(n_components=2, random_state=42, perplexity=perplexity)
             reduced = reducer.fit_transform(all_features)
             explained_var = None
+        else:
+            raise ValueError(f"Unknown method '{method}'. Must be 'pca' or 'tsne'.")
         
         # Create visualization
         fig, ax = plt.subplots(figsize=(10, 8))
@@ -358,6 +391,12 @@ class FeaturePriorVisualizer:
             ax2.set_title('ROI Attention Weights', fontsize=14, fontweight='bold')
         
         fig.subplots_adjust(left=0.1, right=0.95, top=0.92, bottom=0.1, wspace=0.3)
+        
+        # Save PDF if enabled
+        if self.save_pdf and save_path:
+            pdf_path = Path(save_path).with_suffix('.pdf')
+            save_figure_as_pdf(fig, pdf_path, dpi=self.dpi, bbox_inches='tight', pad_inches=0.1)
+        
         vis_array = figure_to_array(fig)
         plt.close(fig)
         
@@ -365,4 +404,169 @@ class FeaturePriorVisualizer:
             Image.fromarray(vis_array).save(save_path)
         
         return vis_array
-
+    
+    def create_feature_evolution_animation(self,
+                                          feature_sequence: List[Dict[str, Any]],
+                                          save_path: Optional[str] = None,
+                                          fps: int = 1) -> str:
+        """
+        Create animation showing feature evolution through diffusion timesteps.
+        
+        Args:
+            feature_sequence: List of feature data dictionaries for each timestep
+            save_path: Path to save GIF
+            fps: Frames per second
+            
+        Returns:
+            Path to saved GIF file
+        """
+        if not feature_sequence:
+            raise ValueError("Feature sequence is empty")
+        
+        frames = []
+        num_frames = len(feature_sequence)
+        
+        print(f"[FeaturePriorVisualizer] Creating animation with {num_frames} frames...")
+        
+        # Use non-interactive backend
+        import matplotlib
+        matplotlib.use('Agg')
+        
+        for frame_idx, feature_data in enumerate(feature_sequence):
+            # Create fresh figure for each frame
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), dpi=100)
+            
+            # Left panel: Feature contributions
+            contribution_scores = feature_data.get('contribution_scores', {})
+            if contribution_scores:
+                categories = ['Raw Features', 'ROI Features']
+                contributions = [
+                    contribution_scores.get('raw_contribution', 0.5),
+                    contribution_scores.get('roi_contribution', 0.5)
+                ]
+                colors = ['skyblue', 'lightcoral']
+                
+                bars = ax1.bar(categories, contributions, color=colors, alpha=0.8, 
+                              edgecolor='black', linewidth=2)
+                ax1.set_ylabel('Contribution (%)', fontsize=10)
+                ax1.set_title('Feature Contribution', fontsize=11, fontweight='bold')
+                ax1.set_ylim(0, 1)
+                ax1.grid(axis='y', alpha=0.3)
+                
+                # Add value labels
+                for bar, val in zip(bars, contributions):
+                    height = bar.get_height()
+                    ax1.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                            f'{val:.2%}', ha='center', va='bottom', fontsize=10)
+            else:
+                ax1.text(0.5, 0.5, 'No contribution data', 
+                        ha='center', va='center', transform=ax1.transAxes, fontsize=12)
+                ax1.set_title('Feature Contribution', fontsize=11)
+            
+            # Right panel: ROI contribution bars
+            patch_attention = feature_data.get('patch_attention')
+            if patch_attention is not None:
+                if isinstance(patch_attention, np.ndarray):
+                    patch_attention = patch_attention.flatten()
+                num_patches = len(patch_attention)
+                
+                # Normalize
+                if patch_attention.max() > 0:
+                    patch_attention = patch_attention / patch_attention.max()
+                
+                x = np.arange(num_patches)
+                bars2 = ax2.bar(x, patch_attention, color='coral', alpha=0.8, 
+                               edgecolor='black', linewidth=1.5)
+                ax2.set_xlabel('ROI Index', fontsize=10)
+                ax2.set_ylabel('Normalized Attention', fontsize=10)
+                ax2.set_title('ROI Attention Weights', fontsize=11, fontweight='bold')
+                ax2.set_xticks(x)
+                ax2.set_xticklabels([f'ROI {i+1}' for i in range(num_patches)], fontsize=8)
+                ax2.grid(axis='y', alpha=0.3)
+                ax2.set_ylim(0, 1.1)
+            else:
+                ax2.text(0.5, 0.5, 'No ROI data', 
+                        ha='center', va='center', transform=ax2.transAxes, fontsize=12)
+                ax2.set_title('ROI Attention Weights', fontsize=11)
+            
+            # Add title with timestep and prediction info
+            timestep = feature_data.get('timestep', frame_idx)
+            pred_class = feature_data.get('prediction', -1)
+            confidence = feature_data.get('confidence', 0.0)
+            
+            if pred_class != -1:
+                class_name = self.class_names.get(str(pred_class), f"Class {pred_class}")
+                title = f'Feature Evolution - Step {frame_idx+1}/{num_frames}\n'
+                title += f'Timestep: {timestep} | {class_name} (Conf: {confidence:.3f})'
+            else:
+                title = f'Feature Evolution - Step {frame_idx+1}/{num_frames}\nTimestep: {timestep}'
+            
+            fig.suptitle(title, fontsize=12, fontweight='bold')
+            fig.subplots_adjust(left=0.1, right=0.95, top=0.88, bottom=0.1, wspace=0.25)
+            
+            # Capture frame
+            fig.canvas.draw()
+            buf = fig.canvas.buffer_rgba()
+            frame_rgba = np.asarray(buf)
+            frame_rgb = frame_rgba[:, :, :3].copy()
+            frames.append(frame_rgb)
+            
+            plt.close(fig)
+            
+            if (frame_idx + 1) % max(1, num_frames // 10) == 0:
+                print(f"  Frame {frame_idx + 1}/{num_frames} captured")
+        
+        if len(frames) == 0:
+            raise ValueError("No frames generated for feature evolution visualization")
+        
+        layout = (5, 2)
+        max_panels = layout[0] * layout[1]
+        frame_indices = select_key_frames(list(range(len(frames))), max_panels)
+        frame_indices = sorted(frame_indices)
+        selected_frames = [frames[i] for i in frame_indices]
+        
+        frame_titles = []
+        for idx in frame_indices:
+            feature_data = feature_sequence[idx]
+            timestep = feature_data.get('timestep', idx)
+            pred_class = feature_data.get('prediction', -1)
+            confidence = feature_data.get('confidence', 0.0)
+            if pred_class != -1:
+                class_name = self.class_names.get(str(pred_class), f"Class {pred_class}")
+                frame_titles.append(f"t={timestep}, {class_name} ({confidence:.2f})")
+            else:
+                frame_titles.append(f"t={timestep}")
+        
+        if save_path is None:
+            save_path = 'feature_evolution.png'
+        save_path = Path(save_path)
+        if save_path.suffix.lower() != '.png':
+            save_path = save_path.with_suffix('.png')
+        
+        save_frame_grid_as_image(
+            selected_frames,
+            save_path,
+            layout=layout,
+            titles=frame_titles,
+            suptitle='Feature Evolution Through Diffusion Timesteps',
+            dpi=self.dpi,
+            frame_size=(3.5, 3.5),
+            spacing=0.4
+        )
+        print(f"[FeaturePriorVisualizer] Stacked feature frames saved to {save_path}")
+        
+        if self.save_pdf:
+            pdf_path = save_path.with_suffix('.pdf')
+            save_animation_frames_as_pdf(
+                selected_frames,
+                pdf_path,
+                layout=layout,
+                titles=frame_titles,
+                suptitle='Feature Evolution Through Diffusion Timesteps',
+                dpi=self.dpi,
+                frame_size=(3.5, 3.5),
+                spacing=0.4
+            )
+            print(f"[FeaturePriorVisualizer] PDF with frames saved to {pdf_path}")
+        
+        return save_path
