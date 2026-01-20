@@ -47,6 +47,12 @@ from xai.explainers.faithfulness_validator import FaithfulnessValidator
 from xai.explainers.conditional_attribution_explainer import ConditionalAttributionExplainer
 from xai.explainers.spatiotemporal_trajectory_explainer import SpatioTemporalTrajectoryExplainer
 from xai.explainers.counterfactual_explainer import GenerativeCounterfactualExplainer
+from xai.explainers.gradcam_explainer import GradCAMExplainer
+from xai.explainers.integrated_gradients_explainer import IntegratedGradientsExplainer
+from xai.explainers.scorecam_explainer import ScoreCAMExplainer
+
+from xai.utils.metrics import compute_all_metrics
+
 from xai.visualizers.attention_vis import AttentionVisualizer
 from xai.visualizers.trajectory_vis import TrajectoryVisualizer
 from xai.visualizers.guidance_vis import GuidanceMapVisualizer
@@ -56,7 +62,6 @@ from xai.visualizers.faithfulness_vis import FaithfulnessVisualizer
 from xai.visualizers.attribution_vis import AttributionVisualizer
 from xai.visualizers.spatiotemporal_vis import SpatioTemporalVisualizer
 from xai.visualizers.counterfactual_vis import CounterfactualVisualizer
-from xai.visualizers.report_generator import ReportGenerator
 from xai.utils.image_utils import load_image, preprocess_for_model
 
 
@@ -73,7 +78,6 @@ class XAIPipeline:
         sample_selector: SampleSelector instance
         explainers: Dictionary of explainer instances
         visualizers: Dictionary of visualizer instances
-        report_generator: ReportGenerator instance
         
     Usage:
         >>> pipeline = XAIPipeline('config/xai_config.yaml')
@@ -121,12 +125,10 @@ class XAIPipeline:
         self.sample_selector = None
         self.explainers = {}
         self.visualizers = {}
-        self.report_generator = None
         
         # Output paths
         self.output_dir = Path(__file__).parent / self.config.output.output_dir
         self.images_dir = self.output_dir / self.config.output.images_dir
-        self.html_dir = self.output_dir / self.config.output.html_dir
         self.arrays_dir = self.output_dir / self.config.output.arrays_dir
         
         # Create output directories
@@ -327,7 +329,6 @@ class XAIPipeline:
             'figure_size': self.config.visualization.figure_size,
             'image_dpi': self.config.output.image_dpi,
             'class_names': self.config.data.class_names,
-            'save_pdf': self.config.output.get('save_pdf', True),
         }
         
         self.visualizers['attention'] = AttentionVisualizer(vis_config)
@@ -339,10 +340,6 @@ class XAIPipeline:
         self.visualizers['attribution'] = AttributionVisualizer(vis_config)
         self.visualizers['spatiotemporal'] = SpatioTemporalVisualizer(vis_config)
         self.visualizers['counterfactual'] = CounterfactualVisualizer(vis_config)
-        if self.config.output.get('save_html', False):
-            self.report_generator = ReportGenerator(vis_config)
-        else:
-            self.report_generator = None
         
         self.logger.info("[OK] All visualizers initialized")
 
@@ -533,66 +530,6 @@ class XAIPipeline:
                 save_path=self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_trajectory.png"
             )
             visualizations['trajectory'] = vis
-            
-            # Create denoising animation if enabled
-            if self.config.output.create_animations:
-                try:
-                    animation_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising_frames.png"
-                    self.visualizers['trajectory'].create_denoising_animation(
-                        diffusion_exp,
-                        save_path=animation_path,
-                        fps=self.config.output.animation_fps
-                    )
-                    results['denoising_animation_path'] = str(animation_path.relative_to(self.output_dir))
-                except Exception as e:
-                    self.logger.warning(f"Failed to create denoising animation: {e}")
-            
-            # Create attention evolution animation if diffusion explainer tracks attention
-            if self.config.output.create_animations and 'attention_evolution' in diffusion_exp:
-                try:
-                    import numpy as np
-                    image_array = np.array(image_pil)
-                    attn_evolution_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attention_evolution_frames.png"
-                    self.visualizers['attention'].create_attention_evolution_animation(
-                        image_array,
-                        diffusion_exp['attention_evolution'],
-                        save_path=attn_evolution_path,
-                        fps=self.config.output.animation_fps
-                    )
-                    results['attention_evolution_path'] = str(attn_evolution_path.relative_to(self.output_dir))
-                except Exception as e:
-                    self.logger.warning(f"Failed to create attention evolution animation: {e}")
-            
-            # Create combined animations if enabled
-            if self.config.output.get('create_combined_animations', True):
-                try:
-                    from xai.visualizers.combined_visualizer import CombinedVisualizer
-                    import numpy as np
-                    image_array = np.array(image_pil)
-                    
-                    # Initialize combined visualizer
-                    combined_vis = CombinedVisualizer(self.config.visualization)
-                    
-                    # Synchronized multi-panel animation
-                    sync_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_synchronized_frames.png"
-                    combined_vis.create_synchronized_animation(
-                        image_array, diffusion_exp, attention_exp,
-                        save_path=sync_anim_path,
-                        fps=self.config.output.animation_fps
-                    )
-                    results['synchronized_animation_path'] = str(sync_anim_path.relative_to(self.output_dir))
-                    
-                    # Image denoising sequence
-                    denoising_seq_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_denoising_sequence_frames.png"
-                    combined_vis.create_image_denoising_sequence(
-                        image_array, diffusion_exp,
-                        save_path=denoising_seq_path,
-                        fps=self.config.output.animation_fps
-                    )
-                    results['denoising_sequence_path'] = str(denoising_seq_path.relative_to(self.output_dir))
-                    
-                except Exception as e:
-                    self.logger.warning(f"Failed to create combined animations: {e}")
         
         # Run conditional attribution explainer (after diffusion, requires trajectory)
         if 'conditional_attribution' in self.explainers:
@@ -669,18 +606,6 @@ class XAIPipeline:
                 )
                 visualizations['coarse_to_fine'] = transition_path.relative_to(self.output_dir)
                 
-                # Animated heatmap if enabled
-                if self.config.output.create_animations:
-                    try:
-                        heatmap_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_attention_heatmap_sequence.png"
-                        spatiotemporal_vis.create_attention_heatmap_sequence(
-                            spatiotemporal_exp['attention_trajectory'],
-                            save_path=heatmap_anim_path,
-                            fps=self.config.output.animation_fps
-                        )
-                        results['attention_heatmap_animation_path'] = str(heatmap_anim_path.relative_to(self.output_dir))
-                    except Exception as e:
-                        self.logger.warning(f"Failed to create attention heatmap animation: {e}")
             except Exception as e:
                 self.logger.exception("Failed to run spatio-temporal trajectory explainer")
         
@@ -733,20 +658,6 @@ class XAIPipeline:
                 )
                 visualizations['prior_comparison'] = comparison_path.relative_to(self.output_dir)
                 
-                # Create guidance evolution animation from diffusion trajectory if available
-                if self.config.output.create_animations and 'diffusion' in self.explainers:
-                    try:
-                        diffusion_exp = results.get('diffusion_exp', {})
-                        if 'trajectory' in diffusion_exp:
-                            guidance_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_guidance_evolution.png"
-                            guidance_vis.create_guidance_evolution_animation_from_trajectory(
-                                diffusion_exp['trajectory'],
-                                save_path=guidance_anim_path,
-                                fps=1
-                            )
-                            results['guidance_evolution_path'] = str(guidance_anim_path.relative_to(self.output_dir))
-                    except Exception as e:
-                        self.logger.warning(f"Failed to create guidance evolution animation: {e}")
             except Exception as e:
                 self.logger.exception("Failed to run guidance map explainer")
         
@@ -808,35 +719,6 @@ class XAIPipeline:
                 )
                 visualizations['roi_importance'] = roi_contribution_path.relative_to(self.output_dir)
                 
-                # Create feature evolution animation if enabled
-                if self.config.output.create_animations and 'diffusion' in self.explainers:
-                    try:
-                        # Create feature sequence from diffusion trajectory (simplified)
-                        # In practice, this would track features at each timestep
-                        diffusion_exp = results.get('diffusion_exp', {})
-                        if 'trajectory' in diffusion_exp:
-                            # Create simplified feature sequence from trajectory
-                            feature_sequence = []
-                            for step in diffusion_exp['trajectory']:
-                                feature_sequence.append({
-                                    'timestep': step.get('timestep', 0),
-                                    'contribution_scores': feature_exp.get('contribution_scores', {}),
-                                    'roi_features': feature_exp.get('roi_features'),
-                                    'fusion_weights': feature_exp.get('fusion_weights'),
-                                    'patch_attention': feature_exp.get('patch_attention'),  # Add patch attention for ROI visualization
-                                    'prediction': step.get('predicted_class', feature_exp.get('prediction', 0)),
-                                    'confidence': float(step.get('probs', [0.0] * 5)[step.get('predicted_class', 0)])
-                                })
-                            
-                            feature_anim_path = self.images_dir / f"class_{ground_truth}_sample_{sample_idx}_feature_evolution.png"
-                            feature_vis.create_feature_evolution_animation(
-                                feature_sequence,
-                                save_path=feature_anim_path,
-                                fps=1
-                            )
-                            results['feature_evolution_path'] = str(feature_anim_path.relative_to(self.output_dir))
-                    except Exception as e:
-                        self.logger.warning(f"Failed to create feature evolution animation: {e}")
             except Exception as e:
                 self.logger.exception("Failed to run feature prior explainer")
         
@@ -894,47 +776,7 @@ class XAIPipeline:
                     visualizations['counterfactual_comparison'] = comparison_path.relative_to(self.output_dir)
                 except Exception as e:
                     self.logger.exception("Failed to run counterfactual explainer")
-        
-        # Generate HTML report
-        if self.config.output.save_html and self.report_generator:
-            self.logger.info("Generating HTML report...")
-            report_path = self.html_dir / f"class_{ground_truth}_sample_{sample_idx}_report.html"
-            
-            sample_info = {
-                'image_path': img_path_rel,
-                'ground_truth': ground_truth
-            }
-            
-            # Collect animation paths
-            animation_paths = {
-                'denoising': results.get('denoising_animation_path'),
-                'attention_evolution': results.get('attention_evolution_path'),
-                'synchronized': results.get('synchronized_animation_path'),
-                'denoising_sequence': results.get('denoising_sequence_path'),
-                'guidance_evolution': results.get('guidance_evolution_path'),
-                'feature_evolution': results.get('feature_evolution_path'),
-                'noise_evolution': results.get('noise_evolution_path'),
-            }
-            # Remove None values
-            animation_paths = {k: v for k, v in animation_paths.items() if v is not None}
-            
-            self.report_generator.create_sample_report(
-                sample_info=sample_info,
-                attention_exp=results.get('attention_exp', {}),
-                diffusion_exp=results.get('diffusion_exp', {}),
-                guidance_exp=results.get('guidance_exp', {}),
-                feature_exp=results.get('feature_exp', {}),
-                noise_exp=results.get('noise_exp', {}),
-                faithfulness_exp=results.get('faithfulness_exp', {}),
-                attribution_exp=results.get('attribution_exp', {}),
-                spatiotemporal_exp=results.get('spatiotemporal_exp', {}),
-                counterfactual_exp=results.get('counterfactual_exp', {}),
-                visualizations=visualizations,
-                animation_paths=animation_paths,
-                save_path=report_path
-            )
-            results['report_path'] = str(report_path.relative_to(self.output_dir))
-        
+
         # Save arrays if requested
         if self.config.output.save_arrays:
             import numpy as np
@@ -975,19 +817,6 @@ class XAIPipeline:
         
         return results
     
-    def generate_summary_report(self, all_results: List[Dict[str, Any]]):
-        """Generate summary HTML report."""
-        if not (self.config.output.save_html and self.report_generator):
-            return
-        
-        self.logger.info("\n" + "="*80)
-        self.logger.info("GENERATING SUMMARY REPORT")
-        self.logger.info("="*80)
-        
-        summary_path = self.html_dir / "index.html"
-        self.report_generator.create_summary_report(all_results, summary_path)
-        
-        self.logger.info(f"[OK] Summary report saved to {summary_path}")
     
     def print_summary_statistics(self, all_results: List[Dict[str, Any]]):
         """Print summary statistics."""
@@ -1081,9 +910,6 @@ class XAIPipeline:
                         raise
             
             # Generate summary report
-            if self.config.output.save_html and self.report_generator:
-                self.generate_summary_report(all_results)
-            
             # Print statistics
             self.print_summary_statistics(all_results)
             
@@ -1158,4 +984,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

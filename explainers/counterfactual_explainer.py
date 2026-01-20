@@ -22,7 +22,6 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from xai.core.base_explainer import BaseExplainer
@@ -200,26 +199,34 @@ class GenerativeCounterfactualExplainer(BaseExplainer):
                 sample=noisy_y
             ).prev_sample
             
-            # Guidance step: steer toward target class
-            if t_idx % 5 == 0:  # Apply guidance every 5 steps for efficiency
-                # Enable gradients for guidance
-                noisy_y_grad = noisy_y.requires_grad_(True)
-                probs_grad = F.softmax(noisy_y_grad.mean(dim=[2, 3]), dim=1)
-                target_logit_grad = probs_grad[0, target_class]
-                
-                # Compute gradient toward target class
-                grad = torch.autograd.grad(
-                    target_logit_grad,
-                    noisy_y_grad,
-                    retain_graph=False,
-                    create_graph=False
-                )[0]
-                
-                # Steer toward target
-                noisy_y = noisy_y + guidance_scale * grad * 0.01
-                
-                # Clamp to valid range
-                noisy_y = torch.clamp(noisy_y, -1.0, 1.0)
+            # Guidance step: steer toward target class every step
+            # Enable gradients for guidance
+            noisy_y_grad = noisy_y.requires_grad_(True)
+            probs_grad = F.softmax(noisy_y_grad.mean(dim=[2, 3]), dim=1)
+            target_logit_grad = probs_grad[0, target_class]
+            
+            # Compute gradient toward target class
+            grad = torch.autograd.grad(
+                target_logit_grad,
+                noisy_y_grad,
+                retain_graph=False,
+                create_graph=False
+            )[0]
+            
+            # Adaptive guidance scaling
+            current_pred = int(torch.argmax(probs_grad, dim=1).item())
+            if current_pred != target_class:
+                # Strong guidance when not at target
+                adaptive_scale = guidance_scale
+            else:
+                # Reduce guidance when reached target
+                adaptive_scale = guidance_scale * 0.5
+            
+            # Steer toward target
+            noisy_y = noisy_y + adaptive_scale * grad * 0.01
+            
+            # Clamp to valid range
+            noisy_y = torch.clamp(noisy_y, -1.0, 1.0)
             
             # Track trajectory (subsample)
             if t_idx % 20 == 0 or t_idx == len(self.scheduler.timesteps) - 1:
